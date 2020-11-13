@@ -9,9 +9,6 @@ const toml = @import("zig-toml/src/toml.zig");
 const ssl = @import("ssl.zig");
 const utils = @import("utils.zig");
 const secret_allocator = @import("secret_allocator.zig");
-
-// todo bug: create, write, delete, read - should read still work?
-
 pub const sodium = @cImport({
     @cInclude("sodium.h");
 });
@@ -19,24 +16,40 @@ pub const sphinx = @cImport({
     @cInclude("sphinx.h");
 });
 
+// todo bug: create, write, delete, read - should read still work?
+
+/// The size of an encrypted pwd gen rule
+///    2 - the size of the rule itself
+///   24 - the nonce for encryption
+///   16 - the mac of the data
+///------
+/// + 42
 const RULE_SIZE = 42;
 
-// normal allocator
+/// normal non-senzitive allocator
 const allocator = std.heap.c_allocator;
-// c_allocator for sensitive data, wrapping sodium_m(un)lock()
+/// c_allocator for sensitive data, wrapping sodium_m(un)lock()
 const s_allocator = secret_allocator.secret_allocator;
 
+/// server config data
 const Config = struct {
     verbose: bool,
+    /// the ipv4 address the server is listening on
     address: []const u8,
     port: u16,
+    /// timeout is currently unused
     timeout: u16,
+    /// the root directory where all data is stored
     datadir: []const u8,
+    /// how many processes can run in parallel
     max_kids: u16,
+    /// server key in DER format
     ssl_key: [:0]const u8,
+    /// server cert in PEM format
     ssl_cert: [:0]const u8,
 };
 
+/// the first byte of a request from a client marks the op
 const ReqType = enum(u8) {
     CREATE = 0x00,
     READ = 0x33,
@@ -48,15 +61,18 @@ const ReqType = enum(u8) {
     DELETE = 0xff,
 };
 
+/// initial request sent from client
 const Request = struct {
     op: ReqType,
+    /// id is the hex string representation of the original [32]u8 id sent by the client
     id: [64]u8,
+    /// the blinded password sent by the client.
     alpha: [32]u8
 };
 
 const SphinxError = error{Error};
 
-pub const LoadBlobError = error{
+const LoadBlobError = error{
     WrongSize,
     WrongRead,
 };
@@ -67,18 +83,19 @@ const SetErrors = error{
     SetEmpty,
 };
 
-const Set = struct {
+/// simple data structure that implements fixed size set semantics
+const Set = struct { // todo reimplement using std.buf_set
     const Self = @This();
     items: []i32 = undefined,
     size: u32 = undefined,
     len: usize = 0,
 
     pub fn init(self: *Self, cfg: *const Config) anyerror!void {
+        self.size = cfg.max_kids;
         self.items = try std.heap.c_allocator.alloc(i32, cfg.max_kids);
         for (self.items) |_, i| {
             self.items[i] = 0;
         }
-        self.size = cfg.max_kids;
     }
 
     pub fn add(self: *Self, pid: i32) SetErrors!void {
@@ -264,23 +281,26 @@ fn loadcfg() anyerror!Config {
 
             if (table.keys.getValue("server")) |server| {
                 cfg.verbose = if (server.Table.keys.getValue("verbose")) |v| v.Boolean else cfg.verbose;
-                cfg.address = if (server.Table.keys.getValue("address")) |v| v.String else cfg.address;
+                cfg.address = if (server.Table.keys.getValue("address")) |v| try mem.dupe(allocator, u8, v.String) else cfg.address;
                 cfg.port = if (server.Table.keys.getValue("port")) |v| @intCast(u16, v.Integer) else cfg.port;
                 cfg.timeout = if (server.Table.keys.getValue("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
-                cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| v.String else cfg.datadir;
+                cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| try mem.dupe(allocator, u8, v.String) else cfg.datadir;
                 cfg.max_kids = if (server.Table.keys.getValue("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
-                cfg.ssl_key = if (server.Table.keys.getValue("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key; // this leaks memory, todo just addNull when used
-                cfg.ssl_cert = if (server.Table.keys.getValue("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert; // this leaks memory, todo just addNull when used
+                cfg.ssl_key = if (server.Table.keys.getValue("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key;
+                cfg.ssl_cert = if (server.Table.keys.getValue("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert;
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
             warn("error loading config {}: {}\n", .{ filename, err });
         }
     }
-    warn("cfg.address: {}\n", .{cfg.address});
-    warn("cfg.port: {}\n", .{cfg.port});
-    warn("cfg.ssl_key: {}\n", .{cfg.ssl_key});
-    warn("cfg.ssl_cert: {}\n", .{cfg.ssl_cert});
+    if(cfg.verbose) {
+        warn("cfg.address: {}\n", .{cfg.address});
+        warn("cfg.port: {}\n", .{cfg.port});
+        warn("cfg.datadir: {}\n", .{cfg.datadir});
+        warn("cfg.ssl_key: {}\n", .{cfg.ssl_key});
+        warn("cfg.ssl_cert: {}\n", .{cfg.ssl_cert});
+    }
     return cfg;
 }
 
