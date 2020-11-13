@@ -234,14 +234,17 @@ fn loadcfg() anyerror!Config {
     defer parser.deinit();
 
     const home = std.os.getenv("HOME") orelse "/nonexistant";
-    const cfg0 = "/etc/sphinx/config";
-    const cfg1 = utils.concat(allocator, home, "/.config/sphinx/config") catch unreachable;
+    const cfg1 = mem.concat(allocator, u8, &[_][]const u8{ home, "/.config/sphinx/config" }) catch unreachable;
     defer allocator.free(cfg1);
-    const cfg2 = utils.concat(allocator, home, "/.sphinxrc") catch unreachable;
+    const cfg2 = mem.concat(allocator, u8, &[_][]const u8{ home, "/.sphinxrc" }) catch unreachable;
     defer allocator.free(cfg2);
-    const cfg3 = "sphinx.cfg";
 
-    const paths: [4][]const u8 = [_][]const u8{ cfg0, cfg1, cfg2, cfg3 };
+    const paths = [_][]const u8{
+        "/etc/sphinx/config",
+        cfg1,
+        cfg2,
+        "sphinx.cfg"
+    };
 
     var cfg = Config{
         .verbose = true,
@@ -282,9 +285,8 @@ fn loadcfg() anyerror!Config {
 }
 
 fn load_blob(balloc: *mem.Allocator, cfg: *const Config, _path: []const u8, fname: []const u8, _size: ?usize) anyerror![]u8 {
-    var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + _path.len + fname.len + 2);
-    defer allocator.free(path_buf);
-    const path = std.fmt.bufPrint(path_buf, "{}/{}/{}", .{ cfg.datadir, _path, fname }) catch unreachable;
+    const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", _path, "/", fname });
+    defer allocator.free(path);
     if (std.os.open(path, std.os.O_RDONLY, 0)) |f| {
         defer std.os.close(f);
         const s = try std.os.fstat(f);
@@ -322,9 +324,8 @@ fn verify_blob(msg: []u8, pk: [32]u8) SphinxError![]u8 {
 }
 
 fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []const u8) anyerror!void {
-    var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + path.len + fname.len + 2);
-    defer allocator.free(path_buf);
-    const fpath = std.fmt.bufPrint(path_buf, "{}/{}/{}", .{ cfg.datadir, path, fname }) catch unreachable;
+    const fpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", path, "/", fname });
+    defer allocator.free(fpath);
     if (std.os.open(fpath, std.os.O_WRONLY | std.os.O_CREAT, 0o600)) |f| {
         defer std.os.close(f);
         const w = try std.os.write(f, blob);
@@ -382,9 +383,10 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
         if (!utils.dir_exists(cfg.datadir[0..cfg.datadir.len])) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
-        var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + hexid.len + 1);
-        defer allocator.free(path_buf);
-        const tdir = std.fmt.bufPrint(path_buf, "{}/{}", .{ cfg.datadir, hexid }) catch unreachable;
+
+        const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
+        defer allocator.free(tdir);
+
         if (!utils.dir_exists(tdir)) {
             std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
         }
@@ -460,9 +462,9 @@ fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    var rulespath_buf: []u8 = allocator.alloc(u8, cfg.datadir.len + 71) catch fail(s, cfg);
-    defer allocator.free(rulespath_buf);
-    const rulespath = std.fmt.bufPrint(rulespath_buf, "{}/{}/rules", .{ cfg.datadir, req.id }) catch fail(s, cfg);
+    const rulespath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..], "/rules" });
+    defer allocator.free(rulespath);
+
     if (cfg.verbose) warn("rulespath: {}\n", .{rulespath});
     //# check if id is unique
     if (std.os.open(rulespath, 0, 0)) |f| {
@@ -612,9 +614,9 @@ fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 fn delete(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + 65);
-    defer allocator.free(path_buf);
-    const path = std.fmt.bufPrint(path_buf, "{}/{}", .{ cfg.datadir, req.id}) catch unreachable;
+    const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
+    defer allocator.free(path);
+
     if(!utils.dir_exists(path)) fail(s,cfg);
 
     auth(cfg, s, req) catch fail(s,cfg);
@@ -628,9 +630,9 @@ fn delete(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
-    var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + 65);
-    defer allocator.free(path_buf);
-    const path = std.fmt.bufPrint(path_buf, "{}/{}", .{ cfg.datadir, req.id}) catch unreachable;
+    const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
+    defer allocator.free(path);
+
     if(!utils.dir_exists(path)) fail(s,cfg);
 
     auth(cfg, s, req) catch fail(s,cfg);
@@ -694,9 +696,8 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
     save_blob(cfg, req.id[0..], "pub", cresp.pk[0..]) catch fail(s, cfg);
     save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
 
-    var newpath_buf: []u8 = try allocator.alloc(u8, path.len + 1 + new.len);
-    defer allocator.free(newpath_buf);
-    const npath = std.fmt.bufPrint(newpath_buf, "{}/{}", .{ path, new}) catch fail(s,cfg);
+    const npath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
+    defer allocator.free(npath);
 
     std.os.unlink(npath) catch fail(s,cfg);
 
@@ -705,9 +706,9 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
 }
 
 fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    var path_buf: []u8 = try allocator.alloc(u8, cfg.datadir.len + 65);
-    defer allocator.free(path_buf);
-    const path = std.fmt.bufPrint(path_buf, "{}/{}", .{ cfg.datadir, req.id}) catch unreachable;
+    const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
+    defer allocator.free(path);
+
     if(!utils.dir_exists(path)) {
         _ = try s.write("new");
         try s.flush();
