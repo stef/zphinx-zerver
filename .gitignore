@@ -1,0 +1,4 @@
+zig-cache/
+.zshhistory
+cert.pem
+server.der
