@@ -12,3 +12,5 @@ openssl req -new -x509 -key server.der -keyform DER -out cert.pem -days 360
 ```
 
 Licensed under AGPLv3+
+
+also shouts to https://github.com/MasterQ32/zig-bearssl for the original bearssl bindings
