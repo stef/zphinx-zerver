@@ -31,7 +31,7 @@ const Config = struct {
     address: []const u8,
     port: u16,
     timeout: u16,
-    datadir: [:0]const u8,
+    datadir: []const u8,
     max_kids: u16,
     ssl_key: [:0]const u8,
     ssl_cert: [:0]const u8,
@@ -267,7 +267,7 @@ fn loadcfg() anyerror!Config {
                 cfg.address = if (server.Table.keys.getValue("address")) |v| v.String else cfg.address;
                 cfg.port = if (server.Table.keys.getValue("port")) |v| @intCast(u16, v.Integer) else cfg.port;
                 cfg.timeout = if (server.Table.keys.getValue("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
-                cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.datadir; // this leaks memory, todo just addNull when used
+                cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| v.String else cfg.datadir;
                 cfg.max_kids = if (server.Table.keys.getValue("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
                 cfg.ssl_key = if (server.Table.keys.getValue("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key; // this leaks memory, todo just addNull when used
                 cfg.ssl_cert = if (server.Table.keys.getValue("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert; // this leaks memory, todo just addNull when used
@@ -380,7 +380,7 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
         const msg = buf[0..32+2+bloblen+64];
         const tmp = verify_blob(msg, pk.*) catch fail(s, cfg);
         const new_blob = tmp[32..32+2+bloblen];
-        if (!utils.dir_exists(cfg.datadir[0..cfg.datadir.len])) {
+        if (!utils.dir_exists(cfg.datadir)) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
 
@@ -514,7 +514,7 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const blob = verify_blob(buf[0..], resp.pk) catch fail(s, cfg);
     const rules = blob[32..];
 
-    if (!utils.dir_exists(cfg.datadir[0..cfg.datadir.len])) {
+    if (!utils.dir_exists(cfg.datadir)) {
         std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
     }
     const tdir = rulespath[0 .. rulespath.len - 6];
@@ -732,7 +732,7 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
         const pk = buf[0..32];
         const tmp = verify_blob(buf[0..msglen], pk.*) catch fail(s, cfg);
         const blob = tmp[32..];
-        if (!utils.dir_exists(cfg.datadir[0..cfg.datadir.len])) {
+        if (!utils.dir_exists(cfg.datadir)) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
         if (!utils.dir_exists(path[0..])) {
