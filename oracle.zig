@@ -28,7 +28,7 @@ const s_allocator = secret_allocator.secret_allocator;
 
 const Config = struct {
     verbose: bool,
-    address: [:0]const u8,
+    address: []const u8,
     port: u16,
     timeout: u16,
     datadir: [:0]const u8,
@@ -264,7 +264,7 @@ fn loadcfg() anyerror!Config {
 
             if (table.keys.getValue("server")) |server| {
                 cfg.verbose = if (server.Table.keys.getValue("verbose")) |v| v.Boolean else cfg.verbose;
-                cfg.address = if (server.Table.keys.getValue("address")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.address; // this leaks memory, todo just addNull when used
+                cfg.address = if (server.Table.keys.getValue("address")) |v| v.String else cfg.address;
                 cfg.port = if (server.Table.keys.getValue("port")) |v| @intCast(u16, v.Integer) else cfg.port;
                 cfg.timeout = if (server.Table.keys.getValue("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
                 cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.datadir; // this leaks memory, todo just addNull when used
