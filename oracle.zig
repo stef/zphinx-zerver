@@ -123,6 +123,8 @@ const Set = struct { // todo reimplement using std.buf_set
     }
 };
 
+/// classical forking server with tcp connection wrapped by bear ssl
+/// number of childs is configurable, as is the listening IPv4 address and port
 pub fn main() anyerror!void {
     const cfg = try loadcfg();
     const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast([*c]const u8, cfg.ssl_key));
@@ -175,6 +177,8 @@ pub fn main() anyerror!void {
     }
 }
 
+/// parse incoming requests into a Request structure
+/// most importantly convert raw id into hex id
 fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
     if (msg.len != 65) fail(s, cfg);
 
@@ -190,6 +194,8 @@ fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
     return req;
 }
 
+/// dispatcher for incoming client requests
+/// parses incoming request and calls appropriate op
 fn handler(cfg: *const Config, s: var) anyerror!void {
     var buf: [128]u8 = undefined; // all requests are 65B initially
     const msglen = try s.read(buf[0..buf.len]);
@@ -227,13 +233,15 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
         },
         else => {
             unreachable;
-        }, // return EINVREQ
+        },
     }
     try s.close();
     allocator.destroy(req);
     os.exit(0);
 }
 
+/// whenever anything fails during the execution of the protocol the server sends
+/// "\x00\x04fail" to the client and terminates.
 fn fail(s: var, cfg: *const Config) noreturn {
     if (cfg.verbose) {
         std.debug.dumpCurrentStackTrace(@frameAddress());
@@ -245,6 +253,13 @@ fn fail(s: var, cfg: *const Config) noreturn {
     s.close() catch unreachable;
     os.exit(0);
 }
+
+/// tries to load the config from
+///   - /etc/sphinx/config
+///   - ~/.config/sphinx/config
+///   - ~/.sphinxrc
+///   - ./sphinx.cfg
+/// and in this process updated the values of the default Config structure
 
 fn loadcfg() anyerror!Config {
     var parser: toml.Parser = undefined;
@@ -263,6 +278,7 @@ fn loadcfg() anyerror!Config {
         "sphinx.cfg"
     };
 
+    // default values for the Config structure
     var cfg = Config{
         .verbose = true,
         .address = "127.0.0.1",
@@ -304,6 +320,8 @@ fn loadcfg() anyerror!Config {
     return cfg;
 }
 
+/// loads a blob from cfg.datadir/_path/fname, can enforce that the blob has an expected _size
+/// returned blob is allocated and must be freed by caller
 fn load_blob(balloc: *mem.Allocator, cfg: *const Config, _path: []const u8, fname: []const u8, _size: ?usize) anyerror![]u8 {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", _path, "/", fname });
     defer allocator.free(path);
@@ -330,12 +348,16 @@ fn load_blob(balloc: *mem.Allocator, cfg: *const Config, _path: []const u8, fnam
     }
 }
 
-// caller is responsible to free returned string
+/// converts a 32B string to a 64B hex string
+/// caller is responsible to free returned string
 fn tohexid(id: [32]u8) anyerror![]u8 {
     const hexbuf = try allocator.alloc(u8, 64);
     return std.fmt.bufPrint(hexbuf, "{x:0>64}", .{id});
 }
 
+/// verifies an ed25519 signed message using libsodiums crypto_sign_verify_detached
+/// expects a msg to be postfixed by ed25519 signature
+/// returns a slice to the verified blob or an error
 fn verify_blob(msg: []u8, pk: [32]u8) SphinxError![]u8 {
     const sig = msg[msg.len - 64 ..];
     const blob = msg[0 .. msg.len - 64];
@@ -343,6 +365,7 @@ fn verify_blob(msg: []u8, pk: [32]u8) SphinxError![]u8 {
     return blob;
 }
 
+/// saves a blob to cfg.datadir/path/fname using strict accessrights
 fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []const u8) anyerror!void {
     const fpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", path, "/", fname });
     defer allocator.free(fpath);
@@ -356,6 +379,10 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
     }
 }
 
+/// some operations in the protocol store a encrypted blob under an id
+/// when such a blob is being updated it is first returned - if it exists - to the client
+/// the client then updates the blob and sends back the updated blob
+/// the steps differ slightly depending on the existance of the blob
 fn update_blob(cfg: *const Config, s: var) anyerror!void {
     var idbuf = [_]u8{0} ** 32;
     //# wait for auth signing pubkey and rules
