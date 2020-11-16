@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const net = std.net;
 const os = std.os;
 const fs = std.fs;
@@ -63,10 +62,8 @@ const ReqType = enum(u8) {
 
 /// initial request sent from client
 const Request = struct {
-    op: ReqType,
-    /// id is the hex string representation of the original [32]u8 id sent by the client
-    id: [64]u8,
-    /// the blinded password sent by the client.
+    op: ReqType, /// id is the hex string representation of the original [32]u8 id sent by the client
+    id: [64]u8, /// the blinded password sent by the client.
     alpha: [32]u8
 };
 
@@ -190,7 +187,7 @@ fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
     var req = allocator.create(Request) catch fail(s, cfg);
     req.op = rreq.op;
     mem.copy(u8, req.alpha[0..], rreq.alpha[0..]);
-    _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{rreq.id}) catch fail (s, cfg);
+    _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{rreq.id}) catch fail(s, cfg);
     return req;
 }
 
@@ -200,7 +197,7 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
     var buf: [128]u8 = undefined; // all requests are 65B initially
     const msglen = try s.read(buf[0..buf.len]);
 
-    const req = parse_req(cfg,s,buf[0..msglen]);
+    const req = parse_req(cfg, s, buf[0..msglen]);
 
     if (cfg.verbose) {
         warn("received: {}B: ", .{msglen});
@@ -260,7 +257,6 @@ fn fail(s: var, cfg: *const Config) noreturn {
 ///   - ~/.sphinxrc
 ///   - ./sphinx.cfg
 /// and in this process updated the values of the default Config structure
-
 fn loadcfg() anyerror!Config {
     var parser: toml.Parser = undefined;
     defer parser.deinit();
@@ -275,7 +271,7 @@ fn loadcfg() anyerror!Config {
         "/etc/sphinx/config",
         cfg1,
         cfg2,
-        "sphinx.cfg"
+        "sphinx.cfg",
     };
 
     // default values for the Config structure
@@ -310,7 +306,7 @@ fn loadcfg() anyerror!Config {
             warn("error loading config {}: {}\n", .{ filename, err });
         }
     }
-    if(cfg.verbose) {
+    if (cfg.verbose) {
         warn("cfg.address: {}\n", .{cfg.address});
         warn("cfg.port: {}\n", .{cfg.port});
         warn("cfg.datadir: {}\n", .{cfg.datadir});
@@ -380,10 +376,18 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
 }
 
 /// some operations in the protocol store a encrypted blob under an id
-/// when such a blob is being updated it is first returned - if it exists - to the client
-/// the client then updates the blob and sends back the updated blob
-/// the steps differ slightly depending on the existance of the blob
+/// when such a blob is being updated it is first returned - if it
+/// exists - to the client the client then updates the blob and sends
+/// back the updated blob the steps differ slightly depending on the
+/// existance of the blob first the client sends over the ID of the
+/// blob it wants to update, the server tries to load it, and if found
+/// sends it back, the client then replies with the signed updated
+/// blob - which we verify and store. otherwise - in case there is no
+/// blob under this id, the sends back a zero-sized blob, to which the
+/// client responds with a pubkey for this id, and the signed
+/// blob. using the pubkey we verify the signed blob and store it.
 fn update_blob(cfg: *const Config, s: var) anyerror!void {
+    // the id under which the blob is stored.
     var idbuf = [_]u8{0} ** 32;
     //# wait for auth signing pubkey and rules
     const idlen = try s.read(idbuf[0..idbuf.len]);
@@ -411,22 +415,22 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
     try s.flush();
 
     if (new) {
-        var buf = [_]u8{0} ** (2+32+64+65536);
+        var buf = [_]u8{0} ** (2 + 32 + 64 + 65536);
         // read pubkey
         const pklen = try s.read(buf[0..32]);
-        if(pklen!=32) fail(s,cfg);
+        if (pklen != 32) fail(s, cfg);
         const pk = buf[0..32];
 
         // read blob size
         const x = try s.read(buf[32..34]);
-        if(x!=2) fail(s,cfg);
+        if (x != 2) fail(s, cfg);
         const bloblen = std.mem.readIntBig(u16, buf[32..34]);
         // read blob
-        const blobsize = try s.read(buf[34..34+bloblen+64]);
-        if (bloblen+64 != blobsize) fail(s, cfg);
-        const msg = buf[0..32+2+bloblen+64];
+        const blobsize = try s.read(buf[34 .. 34 + bloblen + 64]);
+        if (bloblen + 64 != blobsize) fail(s, cfg);
+        const msg = buf[0 .. 32 + 2 + bloblen + 64];
         const tmp = verify_blob(msg, pk.*) catch fail(s, cfg);
-        const new_blob = tmp[32..32+2+bloblen];
+        const new_blob = tmp[32 .. 32 + 2 + bloblen];
         if (!utils.dir_exists(cfg.datadir)) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
@@ -451,21 +455,26 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
         }
         defer allocator.free(pk);
 
-        var buf = [_]u8{0} ** (2+64+65536);
+        var buf = [_]u8{0} ** (2 + 64 + 65536);
         // read blob size
         const x = try s.read(buf[0..2]);
-        if(x!=2) fail(s,cfg);
+        if (x != 2) fail(s, cfg);
         const bloblen = std.mem.readIntBig(u16, buf[0..2]);
         // read blob
-        const blobsize = try s.read(buf[2..2+bloblen+64]);
-        if (bloblen+64 != blobsize) fail(s, cfg);
-        const msg = buf[0..2+bloblen+64];
+        const blobsize = try s.read(buf[2 .. 2 + bloblen + 64]);
+        if (bloblen + 64 != blobsize) fail(s, cfg);
+        const msg = buf[0 .. 2 + bloblen + 64];
         const tmp = verify_blob(msg, pk[0..32].*) catch fail(s, cfg);
-        const new_blob = tmp[0..2+bloblen];
+        const new_blob = tmp[0 .. 2 + bloblen];
         save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
     }
 }
 
+/// auth is used in all (but create and get) operations it evaluates
+/// the oprf, sends back beta and a nonce, which needs to be signed
+/// correctly to authorize whatever operation follows. the pubkey for
+/// the signature is stored in the directory indicated by the ID in
+/// the initial request from the client.
 fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
     var key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
@@ -484,11 +493,11 @@ fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
     if (-1 == sphinx.sphinx_respond(&req.alpha, key.ptr, resp[0..32])) fail(s, cfg);
     s_allocator.free(key); // sanitize
 
-    sodium.randombytes_buf(resp[32..].ptr, resp.len-32); // nonce to sign
+    sodium.randombytes_buf(resp[32..].ptr, resp.len - 32); // nonce to sign
 
     const rlen = try s.write(resp[0..]);
     try s.flush();
-    if (rlen != resp.len) fail(s,cfg);
+    if (rlen != resp.len) fail(s, cfg);
 
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
@@ -501,13 +510,15 @@ fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
 
     var sig = [_]u8{0} ** 64;
     const siglen = try s.read(sig[0..sig.len]);
-    if(siglen!=sig.len) fail(s,cfg);
+    if (siglen != sig.len) fail(s, cfg);
     if (0 != sodium.crypto_sign_verify_detached(&sig, resp[32..].ptr, 32, pk[0..].ptr)) {
         warn("bad sig\n", .{});
         fail(s, cfg);
     }
 }
 
+/// this op creates an oprf key, stores it with an associated pubkey
+/// of the client, and updates a blob.
 fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const rulespath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..], "/rules" });
     defer allocator.free(rulespath);
@@ -525,9 +536,9 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     }
 
     var key: []u8 = undefined;
-    //# 1st step OPRF with a new seed
-    //# this might be if the user already has stored a blob for this id
-    //# and now also wants a sphinx rwd
+    // 1st step OPRF with a new seed
+    // this might be if the user already has stored a blob for this id
+    // and now also wants a sphinx rwd
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
         key = k;
     } else |err| {
@@ -540,7 +551,6 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     }
     defer s_allocator.free(key);
 
-    //var beta: [32]u8 = undefined;
     var beta = [_]u8{0} ** 32;
 
     if (-1 == sphinx.sphinx_respond(&req.alpha, key.ptr, &beta)) fail(s, cfg);
@@ -561,6 +571,9 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const blob = verify_blob(buf[0..], resp.pk) catch fail(s, cfg);
     const rules = blob[32..];
 
+    // todo check if pubkey already exists, then we can skip the
+    // following mkdirs, and we *must* verify that the pubkey in the
+    // storage is the same as in the response.
     if (!utils.dir_exists(cfg.datadir)) {
         std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
     }
@@ -573,14 +586,15 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
     save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
 
-    //# 3rd phase
-    //update_blob(s) # add user to host record
+    // 3rd phase
+    // add user to host record
     update_blob(cfg, s) catch fail(s, cfg);
 
     _ = try s.write("ok");
     try s.flush();
 }
 
+/// this function evaluates the oprf and sends back beta
 fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
     var bail = false;
 
@@ -591,6 +605,11 @@ fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
         key = k;
     } else |err| {
+        // todo?
+        //key = try s_allocator.alloc(u8, 32);
+        // todo should actually be always the same for repeated alphas
+        // possibly use an hmac to calculate this. but that introduces a timing side chan....
+        //sodium.randombytes_buf(&key, key.len);
         bail = true;
     }
 
@@ -607,7 +626,7 @@ fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
     //var beta: [32]u8 = undefined;
     var beta = [_]u8{0} ** 32;
 
-    if(bail) fail(s,cfg);
+    if (bail) fail(s, cfg);
 
     if (-1 == sphinx.sphinx_respond(&req.alpha, key.ptr, &beta)) fail(s, cfg);
     s_allocator.free(key); // sanitize
@@ -625,8 +644,9 @@ fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
     try s.flush();
 }
 
+/// this op creates a new oprf key under the id, but stores it as "new", it must be "commited" to be set active
 fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    auth(cfg, s, req) catch fail(s,cfg);
+    auth(cfg, s, req) catch fail(s, cfg);
 
     var key = [_]u8{0} ** 32; // todo sanitize
     sodium.randombytes_buf(&key, 32);
@@ -643,7 +663,7 @@ fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
     if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], null)) |r| {
         rules = r;
     } else |err| {
-        fail(s,cfg);
+        fail(s, cfg);
     }
 
     var resp = try allocator.alloc(u8, beta.len + rules.len);
@@ -660,29 +680,33 @@ fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
     try s.flush();
 }
 
+/// this op deletes a complete id if it is authenticated, a host-username blob is also updated.
 fn delete(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    if(!utils.dir_exists(path)) fail(s,cfg);
+    if (!utils.dir_exists(path)) fail(s, cfg);
 
-    auth(cfg, s, req) catch fail(s,cfg);
+    auth(cfg, s, req) catch fail(s, cfg);
 
     update_blob(cfg, s) catch fail(s, cfg);
 
-    std.fs.cwd().deleteTree(path) catch fail(s,cfg);
+    std.fs.cwd().deleteTree(path) catch fail(s, cfg);
 
     _ = try s.write("ok");
     try s.flush();
 }
 
+/// this generic function implements both commit and undo. essentially
+/// it sets the one in "new" as the new key, and stores the old key
+/// under "old"
 fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    if(!utils.dir_exists(path)) fail(s,cfg);
+    if (!utils.dir_exists(path)) fail(s, cfg);
 
-    auth(cfg, s, req) catch fail(s,cfg);
+    auth(cfg, s, req) catch fail(s, cfg);
 
     var bail = false;
 
@@ -707,7 +731,7 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
         bail = true;
     }
 
-    if(bail) fail(s,cfg);
+    if (bail) fail(s, cfg);
 
     var beta = [_]u8{0} ** 32;
 
@@ -746,17 +770,18 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
     const npath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
     defer allocator.free(npath);
 
-    std.os.unlink(npath) catch fail(s,cfg);
+    std.os.unlink(npath) catch fail(s, cfg);
 
     _ = try s.write("ok");
     try s.flush();
 }
 
+/// this op creates or updates an existing blob
 fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    if(!utils.dir_exists(path)) {
+    if (!utils.dir_exists(path)) {
         _ = try s.write("new");
         try s.flush();
 
@@ -772,10 +797,10 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
         try s.flush();
 
         // (8192+32+64+48) = pubkey, signature, max 8192B sealed(+48B) blob
-        var buf: [8192+32+64+48]u8 = undefined; // pubkey, rule, signature
+        var buf: [8192 + 32 + 64 + 48]u8 = undefined; // pubkey, rule, signature
         //# wait for auth signing pubkey and rules
         const msglen = try s.read(buf[0..buf.len]);
-        if (msglen <= 32+64+48) fail(s, cfg);
+        if (msglen <= 32 + 64 + 48) fail(s, cfg);
         const pk = buf[0..32];
         const tmp = verify_blob(buf[0..msglen], pk.*) catch fail(s, cfg);
         const blob = tmp[32..];
@@ -792,9 +817,9 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
     } else {
         _ = try s.write("old");
         try s.flush();
-        auth(cfg, s, req) catch fail(s,cfg);
+        auth(cfg, s, req) catch fail(s, cfg);
 
-        var blob: [8192+48]u8 = undefined; // max 8192B sealed(+48B) blob
+        var blob: [8192 + 48]u8 = undefined; // max 8192B sealed(+48B) blob
         //# wait for auth signing pubkey and rules
         const msglen = try s.read(blob[0..blob.len]);
         if (msglen <= 48) fail(s, cfg);
@@ -804,8 +829,9 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
     try s.flush();
 }
 
+/// this op returns a requested blob
 fn read(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    auth(cfg, s, req) catch fail(s,cfg);
+    auth(cfg, s, req) catch fail(s, cfg);
 
     var blob: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "blob", null)) |r| {
