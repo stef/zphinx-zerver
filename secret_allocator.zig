@@ -12,6 +12,7 @@ const Allocator = mem.Allocator;
 
 pub const secret_allocator = &secret_allocator_state;
 
+// todo you're using the now kinda old allocator interface, are you compiling with an old compiler?
 var secret_allocator_state = Allocator{
     .reallocFn = secretRealloc,
     .shrinkFn = secretShrink,
