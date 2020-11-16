@@ -32,8 +32,12 @@ fn linklibsphinx(comptime path_prefix: []const u8, module: *std.build.LibExeObjS
     module.linkLibC();
     module.addIncludeDir(path_prefix ++ "/sphinx/src");
 
-    module.addCSourceFile(path_prefix ++ "/sphinx/src/sphinx.c", &[_][]const u8{"-Wall",});
-    module.addCSourceFile(path_prefix ++ "/sphinx/src/common.c", &[_][]const u8{"-Wall",});
+    module.addCSourceFile(path_prefix ++ "/sphinx/src/sphinx.c", &[_][]const u8{
+        "-Wall",
+    });
+    module.addCSourceFile(path_prefix ++ "/sphinx/src/common.c", &[_][]const u8{
+        "-Wall",
+    });
 }
 
 /// Adds all BearSSL sources to the exeobj step
