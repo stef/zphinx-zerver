@@ -220,6 +220,7 @@ pub fn Stream(comptime SrcInStream: type, comptime SrcOutStream: type) type {
         }
 
         pub const DstInStream = std.io.InStream(*Self, ReadError, read);
+        // todo inStream and outStream are deprecated, it's reader and writer now
         pub fn inStream(self: *Self) DstInStream {
             return .{ .context = self };
         }
