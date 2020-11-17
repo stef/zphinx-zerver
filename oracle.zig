@@ -587,19 +587,22 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
     const blob = verify_blob(buf[0..], resp.pk) catch fail(s, cfg);
     const rules = blob[32..];
 
-    // todo check if pubkey already exists, then we can skip the
+    // check if pubkey already exists, then we can skip the
     // following mkdirs, and we *must* verify that the pubkey in the
     // storage is the same as in the response.
-    if (!utils.dir_exists(cfg.datadir)) {
-        std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
+    if (load_blob(s_allocator, cfg, req.id[0..], "pub"[0..], 32)) |pk| {
+        if(sodium.sodium_memcmp(pk.ptr,resp.pk[0..], pk.len)!=0) fail(s,cfg);
+    } else |err| {
+        if (!utils.dir_exists(cfg.datadir)) {
+            std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
+        }
+        const tdir = rulespath[0 .. rulespath.len - 6];
+        if (!utils.dir_exists(tdir)) {
+            std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
+        }
+        save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
     }
-    const tdir = rulespath[0 .. rulespath.len - 6];
-    if (!utils.dir_exists(tdir)) {
-        std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
-    }
-
     save_blob(cfg, req.id[0..], "key", key) catch fail(s, cfg);
-    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
     save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
 
     // 3rd phase
