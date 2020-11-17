@@ -4,6 +4,7 @@ const net = std.net;
 const os = std.os;
 const fs = std.fs;
 const mem = std.mem;
+const BufSet = std.BufSet;
 const warn = std.debug.warn;
 const toml = @import("zig-toml/src/toml.zig");
 const ssl = @import("ssl.zig");
@@ -76,55 +77,10 @@ const LoadBlobError = error{
     WrongRead,
 };
 
-const SetErrors = error{
-    PidNotFound,
-    SetFull,
-    SetEmpty,
-};
-
 var conn: net.StreamServer.Connection = undefined;
 
-/// simple data structure that implements fixed size set semantics
-const Set = struct { // todo reimplement using std.buf_set
-    const Self = @This();
-    items: []i32 = undefined,
-    size: u32 = undefined,
-    len: usize = 0,
-
-    pub fn init(self: *Self, cfg: *const Config) anyerror!void {
-        self.size = cfg.max_kids;
-        self.items = try std.heap.c_allocator.alloc(i32, cfg.max_kids);
-        for (self.items) |_, i| {
-            self.items[i] = 0;
-        }
-    }
-
-    pub fn add(self: *Self, pid: i32) SetErrors!void {
-        if (self.len >= self.items.len) return SetErrors.SetFull;
-        for (self.items) |v, i| {
-            if (v == 0) {
-                self.items[i] = pid;
-                self.len += 1;
-                return;
-            }
-        }
-        unreachable;
-    }
-
-    pub fn del(self: *Self, pid: i32) SetErrors!void {
-        if (self.len == 0) return SetErrors.SetEmpty;
-        for (self.items) |v, i| {
-            if (v == pid) {
-                self.items[i] = 0;
-                self.len -= 1;
-                return;
-            }
-        }
-        return SetErrors.PidNotFound;
-    }
-};
-
-pub fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
+/// workaround for std.net.StreamServer.accept not being able to handle SO_*TIMEO
+fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
     const accept_flags = os.SOCK_CLOEXEC;
     var accepted_addr: net.Address = undefined;
     var adr_len: os.socklen_t = @sizeOf(net.Address);
@@ -164,8 +120,7 @@ pub fn main() anyerror!void {
     try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_SNDTIMEO, mem.asBytes(&to));
     try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_RCVTIMEO, mem.asBytes(&to));
 
-    var kids = Set{};
-    try kids.init(&cfg);
+    var kids = BufSet.init(allocator);
 
     while (true) {
         //conn = try srv.accept();
@@ -177,7 +132,7 @@ pub fn main() anyerror!void {
                 var status: Status = undefined;
                 const rc = os.system.waitpid(-1, &status, os.WNOHANG);
                 if(rc>0) {
-                    try kids.del(rc);
+                    kids.delete(mem.asBytes(&rc));
                     if(cfg.verbose) warn("removing done kid {} from pool\n",.{rc});
                 }
                 continue;
@@ -185,11 +140,11 @@ pub fn main() anyerror!void {
             unreachable;
         }
 
-        while (kids.len >= kids.items.len) {
+        while (kids.count() >= cfg.max_kids) {
             if (cfg.verbose) warn("waiting for kid to die\n", .{});
             const pid = std.os.waitpid(-1, 0).pid;
             if (cfg.verbose) warn("wait returned: {}\n", .{pid});
-            try kids.del(pid);
+            kids.delete(mem.asBytes(&pid));
         }
 
         var pid = try os.fork();
@@ -208,7 +163,7 @@ pub fn main() anyerror!void {
                 try handler(&cfg, &s);
             },
             else => {
-                try kids.add(pid);
+                try kids.put(mem.asBytes(&pid));
                 conn.file.close();
             },
         }
