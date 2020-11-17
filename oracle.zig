@@ -667,7 +667,8 @@ fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
 fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
-    var key = [_]u8{0} ** 32; // todo sanitize
+    var key = [_]u8{0} ** 32;
+    if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
     sodium.randombytes_buf(&key, 32);
 
     //var beta: [32]u8 = undefined;
@@ -694,6 +695,7 @@ fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
     allocator.free(rules);
 
     save_blob(cfg, req.id[0..], "new", key[0..]) catch fail(s, cfg);
+    _ = sodium.sodium_munlock(&key,32);
 
     _ = try s.write(resp[0..]);
     try s.flush();
