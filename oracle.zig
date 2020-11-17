@@ -25,7 +25,7 @@ pub const sphinx = @cImport({
 /// + 42
 const RULE_SIZE = 42;
 
-/// normal non-senzitive allocator
+/// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
 /// c_allocator for sensitive data, wrapping sodium_m(un)lock()
 const s_allocator = secret_allocator.secret_allocator;
@@ -64,6 +64,7 @@ const ReqType = enum(u8) {
 const Request = struct {
     op: ReqType, /// id is the hex string representation of the original [32]u8 id sent by the client
     id: [64]u8, /// the blinded password sent by the client.
+    has_alpha: bool = true,
     alpha: [32]u8
 };
 
@@ -79,6 +80,8 @@ const SetErrors = error{
     SetFull,
     SetEmpty,
 };
+
+var conn: net.StreamServer.Connection = undefined;
 
 /// simple data structure that implements fixed size set semantics
 const Set = struct { // todo reimplement using std.buf_set
@@ -141,7 +144,7 @@ pub fn main() anyerror!void {
     try kids.init(&cfg);
 
     while (true) {
-        var conn = try srv.accept();
+        conn = try srv.accept();
 
         while (kids.len >= kids.items.len) {
             if (cfg.verbose) warn("waiting for kid to die\n", .{});
@@ -177,6 +180,14 @@ pub fn main() anyerror!void {
 /// parse incoming requests into a Request structure
 /// most importantly convert raw id into hex id
 fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
+    if(@intToEnum(ReqType, msg[0]) == ReqType.READ and msg.len == 33) {
+        var req = allocator.create(Request) catch fail(s, cfg);
+        req.op = ReqType.READ;
+        req.has_alpha = false;
+        _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{msg[1..]}) catch fail(s, cfg);
+        return req;
+    }
+
     if (msg.len != 65) fail(s, cfg);
 
     const RawRequest = packed struct {
@@ -240,6 +251,7 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
 /// whenever anything fails during the execution of the protocol the server sends
 /// "\x00\x04fail" to the client and terminates.
 fn fail(s: var, cfg: *const Config) noreturn {
+    @setCold(true);
     if (cfg.verbose) {
         std.debug.dumpCurrentStackTrace(@frameAddress());
         warn("fail\n", .{});
@@ -247,6 +259,7 @@ fn fail(s: var, cfg: *const Config) noreturn {
     }
     _ = s.write("\x00\x04fail") catch unreachable;
     s.flush() catch unreachable;
+    _ = std.os.linux.shutdown(conn.file.handle, std.os.linux.SHUT_RDWR);
     s.close() catch unreachable;
     os.exit(0);
 }
@@ -258,6 +271,7 @@ fn fail(s: var, cfg: *const Config) noreturn {
 ///   - ./sphinx.cfg
 /// and in this process updated the values of the default Config structure
 fn loadcfg() anyerror!Config {
+    @setCold(true);
     var parser: toml.Parser = undefined;
     defer parser.deinit();
 
@@ -476,43 +490,45 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
 /// the signature is stored in the directory indicated by the ID in
 /// the initial request from the client.
 fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    var key: []u8 = undefined;
-    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
-        key = k;
-    } else |err| {
-        // fake response
-        key = try s_allocator.alloc(u8, 32);
-        // todo should actually be always the same for repeated alphas
-        // possibly use an hmac to calculate this. but that introduces a timing side chan....
-        sodium.randombytes_buf(&key, key.len);
-    }
-
-    var resp = try allocator.alloc(u8, 64);
-    defer allocator.free(resp);
-
-    if (-1 == sphinx.sphinx_respond(&req.alpha, key.ptr, resp[0..32])) fail(s, cfg);
-    s_allocator.free(key); // sanitize
-
-    sodium.randombytes_buf(resp[32..].ptr, resp.len - 32); // nonce to sign
-
-    const rlen = try s.write(resp[0..]);
-    try s.flush();
-    if (rlen != resp.len) fail(s, cfg);
-
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
     } else |err| {
-        // fake pubkey
-        pk = try allocator.alloc(u8, 32);
-        sodium.randombytes_buf(pk[0..].ptr, pk.len);
+        fail(s, cfg);
     }
 
+    var resp : []u8 = undefined;
+    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
+        resp = try allocator.alloc(u8, 64);
+
+        if (-1 == sphinx.sphinx_respond(&req.alpha, k.ptr, resp[0..32])) fail(s, cfg);
+        s_allocator.free(k);
+
+        sodium.randombytes_buf(resp[32..].ptr, resp.len - 32); // nonce to sign
+    } else |err| {
+        resp = try allocator.alloc(u8, 32);
+        sodium.randombytes_buf(resp[0..].ptr, resp.len); // nonce to sign
+    }
+    defer allocator.free(resp);
+
+    const rlen = try s.write(resp[0..]);
+    try s.flush();
+    if (rlen != resp.len) fail(s, cfg);
+    if(cfg.verbose) {
+        warn("[auth] sent ",.{});
+        utils.hexdump(resp[0..]);
+    }
     var sig = [_]u8{0} ** 64;
     const siglen = try s.read(sig[0..sig.len]);
     if (siglen != sig.len) fail(s, cfg);
-    if (0 != sodium.crypto_sign_verify_detached(&sig, resp[32..].ptr, 32, pk[0..].ptr)) {
+    if(cfg.verbose) {
+        warn("[auth] sig ",.{});
+        utils.hexdump(sig[0..]);
+    }
+    if (0 != sodium.crypto_sign_verify_detached(&sig, resp[resp.len - 32..].ptr, 32, pk[0..].ptr)) {
         warn("bad sig\n", .{});
+        if(cfg.verbose) warn("pk: ",.{});
+        utils.hexdump(pk);
         fail(s, cfg);
     }
 }
