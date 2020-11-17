@@ -1,3 +1,4 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const net = std.net;
 const os = std.os;
@@ -123,6 +124,21 @@ const Set = struct { // todo reimplement using std.buf_set
     }
 };
 
+pub fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
+    const accept_flags = os.SOCK_CLOEXEC;
+    var accepted_addr: net.Address = undefined;
+    var adr_len: os.socklen_t = @sizeOf(net.Address);
+    if (os.accept4(self.sockfd.?, &accepted_addr.any, &adr_len, accept_flags)) |fd| {
+        return net.StreamServer.Connection{
+            .file = fs.File{
+                .handle = fd,
+                .io_mode = std.io.mode,
+            },
+            .address = accepted_addr,
+        };
+    } else |err| return err;
+}
+
 /// classical forking server with tcp connection wrapped by bear ssl
 /// number of childs is configurable, as is the listening IPv4 address and port
 pub fn main() anyerror!void {
@@ -135,21 +151,43 @@ pub fn main() anyerror!void {
         .kernel_backlog = 128,
         .reuse_address = true,
     };
+
     var srv = net.StreamServer.init(opt);
     var addr = try net.Address.parseIp4(cfg.address, cfg.port);
 
     srv.listen(addr) catch unreachable;
 
+    const to = os.timeval{
+        .tv_sec = cfg.timeout,
+        .tv_usec = 0
+    };
+    try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_SNDTIMEO, mem.asBytes(&to));
+    try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_RCVTIMEO, mem.asBytes(&to));
+
     var kids = Set{};
     try kids.init(&cfg);
 
     while (true) {
-        conn = try srv.accept();
+        //conn = try srv.accept();
+        if(accept(&srv)) |c| {
+            conn = c;
+        } else |e| {
+            if(e==error.WouldBlock) {
+                const Status = if (builtin.link_libc) c_uint else u32;
+                var status: Status = undefined;
+                const rc = os.system.waitpid(-1, &status, os.WNOHANG);
+                if(rc>0) {
+                    try kids.del(rc);
+                    if(cfg.verbose) warn("removing done kid {} from pool\n",.{rc});
+                }
+                continue;
+            }
+            unreachable;
+        }
 
         while (kids.len >= kids.items.len) {
             if (cfg.verbose) warn("waiting for kid to die\n", .{});
             const pid = std.os.waitpid(-1, 0).pid;
-            //const pid = std.os.waitpid(-1, 0);
             if (cfg.verbose) warn("wait returned: {}\n", .{pid});
             try kids.del(pid);
         }
