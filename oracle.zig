@@ -806,7 +806,8 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
         _ = try s.write("new");
         try s.flush();
 
-        var key = [_]u8{0} ** 32; // todo sanitize
+        var key = [_]u8{0} ** 32;
+        if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
         sodium.randombytes_buf(&key, 32);
 
         //var beta: [32]u8 = undefined;
@@ -832,6 +833,7 @@ fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
             std.os.mkdir(path, 0o700) catch fail(s, cfg);
         }
         save_blob(cfg, req.id[0..], "key", key[0..]) catch fail(s, cfg);
+        _ = sodium.sodium_munlock(&key,32);
         save_blob(cfg, req.id[0..], "pub", pk) catch fail(s, cfg);
         save_blob(cfg, req.id[0..], "blob", blob) catch fail(s, cfg);
         update_blob(cfg, s) catch fail(s, cfg);
