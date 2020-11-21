@@ -58,7 +58,6 @@ const ReqType = enum(u8) {
     GET = 0x66,
     COMMIT = 0x99,
     CHANGE = 0xaa,
-    WRITE = 0xcc,
     DELETE = 0xff,
 };
 
@@ -228,9 +227,6 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
         },
         ReqType.READ => {
             try read(cfg, s, req);
-        },
-        ReqType.WRITE => {
-            try write(cfg, s, req);
         },
         else => {
             unreachable;
@@ -786,61 +782,6 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
 
     std.os.unlink(npath) catch fail(s, cfg);
 
-    _ = try s.write("ok");
-    try s.flush();
-}
-
-/// this op creates or updates an existing blob
-fn write(cfg: *const Config, s: var, req: *Request) anyerror!void {
-    const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
-    defer allocator.free(path);
-
-    if (!utils.dir_exists(path)) {
-        _ = try s.write("new");
-        try s.flush();
-
-        var key = [_]u8{0} ** 32;
-        if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
-        sodium.randombytes_buf(&key, 32);
-
-        //var beta: [32]u8 = undefined;
-        var beta = [_]u8{0} ** 32;
-
-        if (-1 == sphinx.sphinx_respond(&req.alpha, &key, &beta)) fail(s, cfg);
-
-        _ = try s.write(beta[0..]);
-        try s.flush();
-
-        // (8192+32+64+48) = pubkey, signature, max 8192B sealed(+48B) blob
-        var buf: [8192 + 32 + 64 + 48]u8 = undefined; // pubkey, rule, signature
-        //# wait for auth signing pubkey and rules
-        const msglen = try s.read(buf[0..buf.len]);
-        if (msglen <= 32 + 64 + 48) fail(s, cfg);
-        const pk = buf[0..32];
-        const tmp = verify_blob(buf[0..msglen], pk.*) catch fail(s, cfg);
-        const blob = tmp[32..];
-        if (!utils.dir_exists(cfg.datadir)) {
-            std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
-        }
-        if (!utils.dir_exists(path[0..])) {
-            std.os.mkdir(path, 0o700) catch fail(s, cfg);
-        }
-        save_blob(cfg, req.id[0..], "key", key[0..]) catch fail(s, cfg);
-        _ = sodium.sodium_munlock(&key,32);
-        save_blob(cfg, req.id[0..], "pub", pk) catch fail(s, cfg);
-        save_blob(cfg, req.id[0..], "blob", blob) catch fail(s, cfg);
-        update_blob(cfg, s) catch fail(s, cfg);
-    } else {
-        _ = try s.write("old");
-        try s.flush();
-        auth(cfg, s, req) catch fail(s, cfg);
-
-        var blob: [8192 + 48]u8 = undefined; // max 8192B sealed(+48B) blob
-        //# wait for auth signing pubkey and rules
-        const msglen = try s.read(blob[0..blob.len]);
-        if (msglen <= 48) fail(s, cfg);
-        save_blob(cfg, req.id[0..], "blob", blob[0..]) catch fail(s, cfg);
-    }
     _ = try s.write("ok");
     try s.flush();
 }
