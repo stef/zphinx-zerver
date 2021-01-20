@@ -159,7 +159,15 @@ pub fn main() anyerror!void {
                     return ssl.convertError(ssl.c.br_ssl_engine_last_error(&sc.eng));
                 }
                 var s = ssl.initStream(&sc.eng, &conn.file, &conn.file);
-                try handler(&cfg, &s);
+                handler(&cfg, &s) catch |err| {
+                    if(err==error.WouldBlock or err==error.IO) {
+                        if(cfg.verbose) warn("timeout, abort.\n",.{});
+                        _ = std.os.linux.shutdown(conn.file.handle, std.os.linux.SHUT_RDWR);
+                        conn.file.close();
+                    } else {
+                        return err;
+                    }
+                };
             },
             else => {
                 try kids.put(mem.asBytes(&pid));
