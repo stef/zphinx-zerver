@@ -18,6 +18,7 @@ pub const sphinx = @cImport({
 });
 
 // todo bug: create, write, delete, read - should read still work?
+// todo ratelimiting
 
 /// The size of an encrypted pwd gen rule
 ///    2 - the size of the rule itself
