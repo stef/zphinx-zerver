@@ -323,6 +323,7 @@ fn loadcfg() anyerror!Config {
         warn("cfg.datadir: {}\n", .{cfg.datadir});
         warn("cfg.ssl_key: {}\n", .{cfg.ssl_key});
         warn("cfg.ssl_cert: {}\n", .{cfg.ssl_cert});
+        warn("cfg.verbose: {}\n", .{cfg.verbose});
     }
     return cfg;
 }
