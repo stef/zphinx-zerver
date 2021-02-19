@@ -1,0 +1,40 @@
+diff --git a/src/common.h b/src/common.h
+index 8831614..330cb60 100644
+--- a/src/common.h
++++ b/src/common.h
+@@ -2,7 +2,7 @@
+ #define COMMON_H
+ 
+ #include <stdint.h>
+-#include <sodium.h>
++#include "sodium.h"
+ #include <string.h>
+ 
+ //#define TRACE 1
+diff --git a/src/sphinx.c b/src/sphinx.c
+index f637838..0b5e859 100644
+--- a/src/sphinx.c
++++ b/src/sphinx.c
+@@ -16,7 +16,7 @@
+     along with pitchforked sphinx. If not, see <http://www.gnu.org/licenses/>.
+ */
+ #include <stdint.h>
+-#include <sodium.h>
++#include "sodium.h"
+ #include "sphinx.h"
+ #ifdef TRACE
+ #include "common.h"
+diff --git a/src/sphinx.h b/src/sphinx.h
+index 8279f89..bf0d0e6 100644
+--- a/src/sphinx.h
++++ b/src/sphinx.h
+@@ -3,7 +3,7 @@
+ 
+ #include <stdint.h>
+ #include <stdlib.h>
+-#include <sodium.h>
++#include "sodium.h"
+ 
+ #define SPHINX_255_SCALAR_BYTES crypto_core_ristretto255_SCALARBYTES
+ #define SPHINX_255_SER_BYTES crypto_core_ristretto255_BYTES
+
