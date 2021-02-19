@@ -19,7 +19,8 @@ in the sphinx submodule.
 
 on a musl-based system just run `zig build -Drelease-safe=true` and be happy.
 
-on debian, you have to edit `build.zig` and in this part
+on debian or other glibc-based systems due to
+https://github.com/ziglang/zig/issues/6469, you might have to edit `build.zig` and in this part
 
 ```
     // on normal systems this is ok:
