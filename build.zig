@@ -6,9 +6,16 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("oracle", "oracle.zig");
     exe.setBuildMode(mode);
 
-    exe.linkSystemLibrary("sodium");
+    // on normal systems this is ok:
+    //exe.linkSystemLibrary("sodium");
+    // on debian, you have to do this:
+    exe.addObjectFile("/usr/lib/x86_64-linux-gnu/libsodium.a");
 
-    const bear = b.addStaticLibrary("libbear.a", null);
+    exe.linkLibC();
+
+    exe.addIncludeDir(".");
+
+    const bear = b.addStaticLibrary("bear", null);
     linkBearSSL(".", bear, target);
     exe.addIncludeDir("./BearSSL/inc");
     exe.addIncludeDir("./BearSSL/src");
@@ -30,6 +37,8 @@ const std = @import("std");
 
 fn linklibsphinx(comptime path_prefix: []const u8, module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) void {
     module.linkLibC();
+    module.setTarget(target);
+
     module.addIncludeDir(path_prefix ++ "/sphinx/src");
 
     module.addCSourceFile(path_prefix ++ "/sphinx/src/sphinx.c", &[_][]const u8{
@@ -44,6 +53,7 @@ fn linklibsphinx(comptime path_prefix: []const u8, module: *std.build.LibExeObjS
 /// Allows simple linking from build scripts.
 fn linkBearSSL(comptime path_prefix: []const u8, module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) void {
     module.linkLibC();
+    module.setTarget(target);
 
     module.addIncludeDir(path_prefix ++ "/BearSSL/inc");
     module.addIncludeDir(path_prefix ++ "/BearSSL/src");
