@@ -10,27 +10,48 @@ pub const sodium = @cImport({
 
 const Allocator = mem.Allocator;
 
-pub const secret_allocator = &secret_allocator_state;
+pub fn SecretAllocator() type {
+    return struct {
+        allocator: Allocator,
+        parent_allocator: *Allocator,
 
-// todo you're using the now kinda old allocator interface, are you compiling with an old compiler?
-var secret_allocator_state = Allocator{
-    .reallocFn = secretRealloc,
-    .shrinkFn = secretShrink,
-};
+        const Self = @This();
 
-fn secretRealloc(self: *Allocator, old_mem: []u8, old_align: u29, new_size: usize, new_align: u29) ![]u8 {
-    assert(new_align <= @alignOf(c_longdouble));
-    const old_ptr = if (old_mem.len == 0) null else @ptrCast(*c_void, old_mem.ptr);
-    if(old_mem.len>0) if(0!=sodium.sodium_munlock(old_ptr,old_mem.len)) return mem.Allocator.Error.OutOfMemory;
-    const buf = c.realloc(old_ptr, new_size) orelse return error.OutOfMemory;
-    if(new_size>0) if(0!=sodium.sodium_mlock(buf,new_size)) return mem.Allocator.Error.OutOfMemory;
-    return @ptrCast([*]u8, buf)[0..new_size];
+        pub fn init(parent_allocator: *Allocator) Self {
+            return Self{
+                .allocator = Allocator{
+                    .allocFn = alloc,
+                    .resizeFn = resize,
+                },
+                .parent_allocator = parent_allocator,
+            };
+        }
+
+
+       fn alloc(allocator: *Allocator, len: usize, ptr_align: u29, len_align: u29, ra: usize,) error{OutOfMemory}![]u8 {
+           const self = @fieldParentPtr(Self, "allocator", allocator);
+           if(self.parent_allocator.allocFn(self.parent_allocator, len, ptr_align, len_align, ra)) |buff| {
+              if(buff.len >0) if(0!=sodium.sodium_mlock(@ptrCast(*c_void, buff),buff.len)) return mem.Allocator.Error.OutOfMemory;
+              return buff;
+           } else |err| {
+              return err;
+           }
+       }
+
+       fn resize( allocator: *Allocator, buf: []u8, buf_align: u29, new_len: usize, len_align: u29, ra: usize,) error{OutOfMemory}!usize {
+           const self = @fieldParentPtr(Self, "allocator", allocator);
+           if(new_len==0) _=sodium.sodium_munlock(@ptrCast(*c_void, buf),buf.len);
+           // TODO FIXME what if new_len != buf.len != 0 // shrink or expand?
+           if(self.parent_allocator.resizeFn(self.parent_allocator, buf, buf_align, new_len, len_align, ra)) |bsize| {
+              if(buf.len>0) _=sodium.sodium_mlock(@ptrCast(*c_void, buf),bsize);
+              return bsize;
+           } else |err| {
+              return err;
+           }
+       }
+   };
 }
 
-fn secretShrink(self: *Allocator, old_mem: []u8, old_align: u29, new_size: usize, new_align: u29) []u8 {
-    const old_ptr = @ptrCast(*c_void, old_mem.ptr);
-    if(old_mem.len>0) _=sodium.sodium_munlock(old_ptr,old_mem.len);
-    const buf = c.realloc(old_ptr, new_size) orelse return old_mem[0..new_size];
-    if(new_size>0) _=sodium.sodium_mlock(buf,new_size);
-    return @ptrCast([*]u8, buf)[0..new_size];
+pub fn secretAllocator(parent_allocator: *Allocator) SecretAllocator() {
+   return SecretAllocator().init(parent_allocator);
 }
