@@ -31,7 +31,8 @@ const RULE_SIZE = 42;
 /// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
 /// c_allocator for sensitive data, wrapping sodium_m(un)lock()
-const s_allocator = secret_allocator.secret_allocator;
+var s_state = secret_allocator.secretAllocator(allocator);
+const s_allocator = &s_state.allocator;
 
 /// server config data
 const Config = struct {
@@ -81,15 +82,11 @@ var conn: net.StreamServer.Connection = undefined;
 
 /// workaround for std.net.StreamServer.accept not being able to handle SO_*TIMEO
 fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
-    const accept_flags = os.SOCK_CLOEXEC;
     var accepted_addr: net.Address = undefined;
     var adr_len: os.socklen_t = @sizeOf(net.Address);
-    if (os.accept4(self.sockfd.?, &accepted_addr.any, &adr_len, accept_flags)) |fd| {
+    if (os.accept(self.sockfd.?, &accepted_addr.any, &adr_len, os.SOCK_CLOEXEC)) |fd| {
         return net.StreamServer.Connection{
-            .file = fs.File{
-                .handle = fd,
-                .io_mode = std.io.mode,
-            },
+            .file = fs.File{ .handle = fd },
             .address = accepted_addr,
         };
     } else |err| return err;
@@ -123,7 +120,6 @@ pub fn main() anyerror!void {
     var kids = BufSet.init(allocator);
 
     while (true) {
-        //conn = try srv.accept();
         if(accept(&srv)) |c| {
             conn = c;
         } else |e| {
@@ -180,7 +176,7 @@ pub fn main() anyerror!void {
 
 /// parse incoming requests into a Request structure
 /// most importantly convert raw id into hex id
-fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
+fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
     if(@intToEnum(ReqType, msg[0]) == ReqType.READ and msg.len == 33) {
         var req = allocator.create(Request) catch fail(s, cfg);
         req.op = ReqType.READ;
@@ -205,7 +201,7 @@ fn parse_req(cfg: *const Config, s: var, msg: []u8) *Request {
 
 /// dispatcher for incoming client requests
 /// parses incoming request and calls appropriate op
-fn handler(cfg: *const Config, s: var) anyerror!void {
+fn handler(cfg: *const Config, s: anytype) anyerror!void {
     var buf: [128]u8 = undefined; // all requests are 65B initially
     const msglen = try s.read(buf[0..buf.len]);
 
@@ -237,9 +233,6 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
         ReqType.READ => {
             try read(cfg, s, req);
         },
-        else => {
-            unreachable;
-        },
     }
     try s.close();
     allocator.destroy(req);
@@ -248,7 +241,7 @@ fn handler(cfg: *const Config, s: var) anyerror!void {
 
 /// whenever anything fails during the execution of the protocol the server sends
 /// "\x00\x04fail" to the client and terminates.
-fn fail(s: var, cfg: *const Config) noreturn {
+fn fail(s: anytype, cfg: *const Config) noreturn {
     @setCold(true);
     if (cfg.verbose) {
         std.debug.dumpCurrentStackTrace(@frameAddress());
@@ -303,15 +296,15 @@ fn loadcfg() anyerror!Config {
         if (t) |table| {
             defer table.deinit();
 
-            if (table.keys.getValue("server")) |server| {
-                cfg.verbose = if (server.Table.keys.getValue("verbose")) |v| v.Boolean else cfg.verbose;
-                cfg.address = if (server.Table.keys.getValue("address")) |v| try mem.dupe(allocator, u8, v.String) else cfg.address;
-                cfg.port = if (server.Table.keys.getValue("port")) |v| @intCast(u16, v.Integer) else cfg.port;
-                cfg.timeout = if (server.Table.keys.getValue("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
-                cfg.datadir = if (server.Table.keys.getValue("datadir")) |v| try mem.dupe(allocator, u8, v.String) else cfg.datadir;
-                cfg.max_kids = if (server.Table.keys.getValue("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
-                cfg.ssl_key = if (server.Table.keys.getValue("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key;
-                cfg.ssl_cert = if (server.Table.keys.getValue("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert;
+            if (table.keys.get("server")) |server| {
+                cfg.verbose = if (server.Table.keys.get("verbose")) |v| v.Boolean else cfg.verbose;
+                cfg.address = if (server.Table.keys.get("address")) |v| try mem.dupe(allocator, u8, v.String) else cfg.address;
+                cfg.port = if (server.Table.keys.get("port")) |v| @intCast(u16, v.Integer) else cfg.port;
+                cfg.timeout = if (server.Table.keys.get("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
+                cfg.datadir = if (server.Table.keys.get("datadir")) |v| try mem.dupe(allocator, u8, v.String) else cfg.datadir;
+                cfg.max_kids = if (server.Table.keys.get("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
+                cfg.ssl_key = if (server.Table.keys.get("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key;
+                cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert;
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
@@ -399,7 +392,7 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
 /// blob under this id, the sends back a zero-sized blob, to which the
 /// client responds with a pubkey for this id, and the signed
 /// blob. using the pubkey we verify the signed blob and store it.
-fn update_blob(cfg: *const Config, s: var) anyerror!void {
+fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     // the id under which the blob is stored.
     var idbuf = [_]u8{0} ** 32;
     //# wait for auth signing pubkey and rules
@@ -488,7 +481,7 @@ fn update_blob(cfg: *const Config, s: var) anyerror!void {
 /// correctly to authorize whatever operation follows. the pubkey for
 /// the signature is stored in the directory indicated by the ID in
 /// the initial request from the client.
-fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn auth(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
@@ -534,7 +527,7 @@ fn auth(cfg: *const Config, s: var, req: *Request) anyerror!void {
 
 /// this op creates an oprf key, stores it with an associated pubkey
 /// of the client, and updates a blob.
-fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn create(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     const rulespath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..], "/rules" });
     defer allocator.free(rulespath);
 
@@ -613,7 +606,7 @@ fn create(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 /// this function evaluates the oprf and sends back beta
-fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn get(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     var bail = false;
 
     var key: []u8 = undefined;
@@ -663,7 +656,7 @@ fn get(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 /// this op creates a new oprf key under the id, but stores it as "new", it must be "commited" to be set active
-fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn change(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
     var key = [_]u8{0} ** 32;
@@ -701,7 +694,7 @@ fn change(cfg: *const Config, s: var, req: *Request) anyerror!void {
 }
 
 /// this op deletes a complete id if it is authenticated, a host-username blob is also updated.
-fn delete(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn delete(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
@@ -720,7 +713,7 @@ fn delete(cfg: *const Config, s: var, req: *Request) anyerror!void {
 /// this generic function implements both commit and undo. essentially
 /// it sets the one in "new" as the new key, and stores the old key
 /// under "old"
-fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
+fn commit_undo(cfg: *const Config, s: anytype, req: *Request, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
@@ -797,7 +790,7 @@ fn commit_undo(cfg: *const Config, s: var, req: *Request, new: *const [3:0]u8, o
 }
 
 /// this op returns a requested blob
-fn read(cfg: *const Config, s: var, req: *Request) anyerror!void {
+fn read(cfg: *const Config, s: anytype, req: *Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
     var blob: []u8 = undefined;
