@@ -49,6 +49,9 @@ finally you need to run `zig build -Drelease-safe=true -Dtarget=x86_64-linux-gnu
 
 ## Running
 
+You could use a docker image provided by
+https://github.com/D3vl0per/zphinx-zerver-docker
+
 to create x509 cert/server key run this - **ONLY** for testing/demo, in production use real certs/keys!!!!
 ```
 openssl req -new -x509 -key server.der -keyform DER -out cert.pem -days 360
