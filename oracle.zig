@@ -16,6 +16,9 @@ pub const sodium = @cImport({
 pub const sphinx = @cImport({
     @cInclude("sphinx.h");
 });
+pub const wordexp = @cImport({
+    @cInclude("wordexp.h");
+});
 
 // todo bug: create, write, delete, read - should read still work?
 // todo ratelimiting
@@ -43,10 +46,10 @@ const Config = struct {
     /// timeout is currently unused
     timeout: u16,
     /// the root directory where all data is stored
-    datadir: []const u8,
+    datadir: [:0]const u8,
     /// how many processes can run in parallel
     max_kids: u16,
-    /// server key in DER format
+    /// server key in PEM format
     ssl_key: [:0]const u8,
     /// server cert in PEM format
     ssl_cert: [:0]const u8,
@@ -165,6 +168,8 @@ pub fn main() anyerror!void {
                         return err;
                     }
                 };
+                os.exit(0);
+
             },
             else => {
                 try kids.put(mem.asBytes(&pid));
@@ -255,6 +260,25 @@ fn fail(s: anytype, cfg: *const Config) noreturn {
     os.exit(0);
 }
 
+fn expandpath(path: []const u8) [:0]u8 {
+    var w: wordexp.wordexp_t=undefined;
+    const s = std.cstr.addNullByte(allocator, path) catch unreachable;
+    defer allocator.free(s);
+    const r = wordexp.wordexp(s,&w, wordexp.WRDE_NOCMD|wordexp.WRDE_UNDEF);
+    defer wordexp.wordfree(&w);
+    if(r!=0) {
+        warn("wordexp({}) returned error: {}\n", .{ s, r });
+        os.exit(1);
+    }
+    if(w.we_wordc!=1) {
+        warn("wordexp({}) not one word: {}\n", .{ s, w.we_wordc });
+        os.exit(1);
+    }
+    const word = std.mem.spanZ(@as([*c]u8, w.we_wordv[0]));
+    var cpy = allocator.dupeZ(u8, word) catch unreachable;
+    return cpy;
+}
+
 /// tries to load the config from
 ///   - /etc/sphinx/config
 ///   - ~/.config/sphinx/config
@@ -287,7 +311,7 @@ fn loadcfg() anyerror!Config {
         .timeout = 3,
         .datadir = "/var/lib/sphinx",
         .max_kids = 5,
-        .ssl_key = "server.der",
+        .ssl_key = "server.pem",
         .ssl_cert = "certs.pem",
     };
 
@@ -298,13 +322,13 @@ fn loadcfg() anyerror!Config {
 
             if (table.keys.get("server")) |server| {
                 cfg.verbose = if (server.Table.keys.get("verbose")) |v| v.Boolean else cfg.verbose;
-                cfg.address = if (server.Table.keys.get("address")) |v| try mem.dupe(allocator, u8, v.String) else cfg.address;
+                cfg.address = if (server.Table.keys.get("address")) |v| try allocator.dupe(u8, v.String) else cfg.address;
                 cfg.port = if (server.Table.keys.get("port")) |v| @intCast(u16, v.Integer) else cfg.port;
                 cfg.timeout = if (server.Table.keys.get("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
-                cfg.datadir = if (server.Table.keys.get("datadir")) |v| try mem.dupe(allocator, u8, v.String) else cfg.datadir;
+                cfg.datadir = if (server.Table.keys.get("datadir")) |v| expandpath(v.String) else cfg.datadir;
                 cfg.max_kids = if (server.Table.keys.get("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
-                cfg.ssl_key = if (server.Table.keys.get("ssl_key")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_key;
-                cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| try std.cstr.addNullByte(allocator, v.String) else cfg.ssl_cert;
+                cfg.ssl_key = if (server.Table.keys.get("ssl_key")) |v| expandpath(v.String) else cfg.ssl_key;
+                cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| expandpath(v.String) else cfg.ssl_cert;
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
