@@ -42,7 +42,7 @@ const s_allocator = &s_state.allocator;
 /// server config data
 const Config = struct {
     verbose: bool,
-    /// the ipv4 address the server is listening on
+    /// the hostname/ip address the server is listening on
     address: []const u8,
     port: u16,
     /// timeout is currently unused
@@ -59,6 +59,9 @@ const Config = struct {
     rl_decay: i64,
     // increase hardness after rl_threshold attempts if not decaying
     rl_threshold: u8,
+    // when checking freshness of puzzle solution, allow this extra
+    // gracetime in addition to the hardness max solution time
+    rl_gracetime: u16,
 };
 
 const ChallengeOp = enum(u8) {
@@ -70,22 +73,23 @@ const ChallengeOp = enum(u8) {
 const Hardness = struct {
     n: u8,
     k: u8,
+    timeout: u16,
 };
 
 const Difficulties = [_]Hardness{
-    Hardness{ .n = 60,  .k = 4 }, // 320KiB, ~0.02
-    Hardness{ .n = 65,  .k = 4 }, // 640KiB, ~0.04
-    Hardness{ .n = 70,  .k = 4 }, // 1MiB, ~0.08
-    Hardness{ .n = 75,  .k = 4 }, // 2MiB, ~0.2
-    Hardness{ .n = 80,  .k = 4 }, // 5MiB, ~0.5
-    Hardness{ .n = 85,  .k = 4 }, // 10MiB, ~0.9
-    Hardness{ .n = 90,  .k = 4 }, // 20MiB, ~2.4
-    Hardness{ .n = 95,  .k = 4 }, // 40MiB, ~4.6
-    Hardness{ .n = 100, .k = 4 }, // 80MiB, ~7.8
-    Hardness{ .n = 105, .k = 4 }, // 160MiB, ~25
-    Hardness{ .n = 110, .k = 4 }, // 320MiB, ~57
-    Hardness{ .n = 115, .k = 4 }, // 640MiB, ~70
-    Hardness{ .n = 120, .k = 4 }, // 1GiB, ~109
+    Hardness{ .n = 60,  .k = 4, .timeout =  1    }, // 320KiB, ~0.02
+    Hardness{ .n = 65,  .k = 4, .timeout =  2    }, // 640KiB, ~0.04
+    Hardness{ .n = 70,  .k = 4, .timeout =  4    }, // 1MiB, ~0.08
+    Hardness{ .n = 75,  .k = 4, .timeout =  9    }, // 2MiB, ~0.2
+    Hardness{ .n = 80,  .k = 4, .timeout =  16   }, // 5MiB, ~0.5
+    Hardness{ .n = 85,  .k = 4, .timeout =  32   }, // 10MiB, ~0.9
+    Hardness{ .n = 90,  .k = 4, .timeout =  80   }, // 20MiB, ~2.4
+    Hardness{ .n = 95,  .k = 4, .timeout =  160  }, // 40MiB, ~4.6
+    Hardness{ .n = 100, .k = 4, .timeout =  320  }, // 80MiB, ~7.8
+    Hardness{ .n = 105, .k = 4, .timeout =  640  }, // 160MiB, ~25
+    Hardness{ .n = 110, .k = 4, .timeout =  1280 }, // 320MiB, ~57
+    Hardness{ .n = 115, .k = 4, .timeout =  2560 }, // 640MiB, ~70
+    Hardness{ .n = 120, .k = 4, .timeout =  5120 }, // 1GiB, ~109
 };
 
 
@@ -116,9 +120,9 @@ const ChallengeRequest = packed struct {
 };
 
 const RatelimitCTX = packed struct {
-    ts: i64,
     level: u8,
-    count: u8,
+    count: u32,
+    ts: i64,
 };
 
 const SphinxError = error{Error};
@@ -318,20 +322,20 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
 
     // assemble challenge
     var challenge : ChallengeRequest = undefined;
-    challenge.ts = std.time.timestamp();
+    const now = std.time.timestamp();
+    challenge.ts = now;
 
     const request = parse_req(cfg, s, req[0..reqlen]);
-
     // figure out n & k params and set them in challenge
-    const now = std.time.timestamp();
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(*RatelimitCTX, diff[0..]);
         warn("rl ctx {}\n", .{ctx});
         if(ctx.level >= Difficulties.len) {
+            // invalid rl context, punish hard
             if (cfg.verbose) warn("invalid difficulty: {}\n", .{ ctx.level });
             ctx.level = Difficulties.len - 1;
-        }
-        if(now - cfg.rl_decay > ctx.ts and ctx.level>0) { // timestamp too long ago, let's decay
+            ctx.count=0;
+        } else if(now - cfg.rl_decay > ctx.ts and ctx.level>0) { // timestamp too long ago, let's decay
             const periods = @divTrunc((now - ctx.ts), cfg.rl_decay);
             if(ctx.level >= periods) {
                 ctx.level = ctx.level - @intCast(u8, periods);
@@ -340,23 +344,30 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
             }
             ctx.count=0;
         } else { // let's slowly turn up the rate limiting
-            if(ctx.count > cfg.rl_threshold) {
+            if(ctx.count >= cfg.rl_threshold and (ctx.level < Difficulties.len - 1)) {
                 ctx.count=0;
-                if(ctx.level < Difficulties.len - 1) ctx.level+=1;
+                ctx.level+=1;
+            } else {
+                ctx.count+=1;
             }
-            ctx.count+=1;
         }
         ctx.ts = now;
+        if(cfg.verbose) warn("rl difficulty: {}\n", .{ctx});
         save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
         challenge.n=Difficulties[ctx.level].n;
         challenge.k=Difficulties[ctx.level].k;
+
+        if((ctx.level == Difficulties.len - 1) and ctx.count>cfg.rl_threshold*2) {
+            warn("\x1b[38;5;196malert\x1b[38;5;253m: someones trying ({}) really hard at: {}\n", .{ctx.count, request.id});
+        }
+
     } else |err| {
         if (err != error.FileNotFound) {
             if (cfg.verbose) warn("cannot open {}/{}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
             fail(s, cfg);
         }
-        challenge.n = 60;
-        challenge.k = 4;
+        challenge.n = Difficulties[0].n;
+        challenge.k = Difficulties[0].k;
         var ctx = RatelimitCTX{
             .level = 0,
             .count = 1,
@@ -422,6 +433,23 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         warn("bad sig on challenge\n", .{});
         fail(s,cfg);
     }
+
+    // check if the puzzle has expired
+    const now = std.time.timestamp();
+    var expired = true;
+    for(Difficulties) |diff| {
+        if(diff.n==challenge.n and
+               diff.k==challenge.k and
+               (now - @intCast(i32, diff.timeout+cfg.rl_gracetime)) < challenge.ts) {
+            expired = false;
+            break;
+        }
+    }
+    if(expired) {
+        warn("puzzle expired. reject\n",.{});
+        fail(s,cfg);
+    }
+
     // valid challenge record, let's read the solution
     const solsize = equihash.solsize(challenge.n, challenge.k);
     var solution: []u8 = try allocator.alloc(u8, @intCast(usize, solsize));
@@ -545,6 +573,7 @@ fn loadcfg() anyerror!Config {
         .ssl_cert = "certs.pem",
         .rl_decay = 1800,
         .rl_threshold = 1,
+        .rl_gracetime = 10,
     };
 
     for (paths) |filename| {
@@ -563,6 +592,7 @@ fn loadcfg() anyerror!Config {
                 cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| expandpath(v.String) else cfg.ssl_cert;
                 cfg.rl_decay = if (server.Table.keys.get("rl_decay")) |v| @intCast(i64, v.Integer) else cfg.rl_decay;
                 cfg.rl_threshold = if (server.Table.keys.get("rl_threshold")) |v| @intCast(u8, v.Integer) else cfg.rl_threshold;
+                cfg.rl_gracetime = if (server.Table.keys.get("rl_gracetime")) |v| @intCast(u16, v.Integer) else cfg.rl_gracetime;
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
@@ -582,6 +612,7 @@ fn loadcfg() anyerror!Config {
         warn("cfg.verbose: {}\n", .{cfg.verbose});
         warn("cfg.rl_decay: {}\n", .{cfg.rl_decay});
         warn("cfg.rl_threshold: {}\n", .{cfg.rl_threshold});
+        warn("cfg.rl_gracetime: {}\n", .{cfg.rl_gracetime});
     }
     return cfg;
 }
