@@ -42,10 +42,10 @@ const s_allocator = &s_state.allocator;
 /// server config data
 const Config = struct {
     verbose: bool,
-    /// the hostname/ip address the server is listening on
+    /// the ipv4 address the server is listening on
     address: []const u8,
     port: u16,
-    /// timeout is currently unused
+    /// tcp connection timeouts
     timeout: u16,
     /// the root directory where all data is stored
     datadir: [:0]const u8,
