@@ -523,11 +523,11 @@ fn expandpath(path: []const u8) [:0]u8 {
     const s = std.cstr.addNullByte(allocator, path) catch unreachable;
     defer allocator.free(s);
     const r = wordexp.wordexp(s,&w, wordexp.WRDE_NOCMD|wordexp.WRDE_UNDEF);
-    defer wordexp.wordfree(&w);
     if(r!=0) {
-        warn("wordexp({}) returned error: {}\n", .{ s, r });
-        os.exit(1);
+        warn("wordexp(\"{}\") returned error: {} - string not expanded\n", .{ s, r});
+        return allocator.dupeZ(u8, path) catch unreachable;
     }
+    defer wordexp.wordfree(&w);
     if(w.we_wordc!=1) {
         warn("wordexp({}) not one word: {}\n", .{ s, w.we_wordc });
         os.exit(1);
