@@ -1010,70 +1010,99 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 
     auth(cfg, s, req) catch fail(s, cfg);
 
-    var bail = false;
-
-    var k: []u8 = undefined;
-    if (load_blob(s_allocator, cfg, req.id[0..], new[0..], null)) |r| {
-        k = r;
+    // load all files to be shuffled around
+    // start with the rules
+    var new_rules: []u8 = undefined;
+    const new_rulespath = try mem.concat(allocator, u8, &[_][]const u8{ "rules.", new[0..] });
+    defer allocator.free(new_rulespath);
+    if (load_blob(allocator, cfg, req.id[0..], new_rulespath, RULE_SIZE)) |r| {
+        new_rules = r;
     } else |err| {
-        bail = true;
+        fail(s,cfg);
     }
+    defer allocator.free(new_rules);
+    var cur_rules: []u8 = undefined;
+    if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], RULE_SIZE)) |r| {
+        cur_rules = r;
+    } else |err| {
+        fail(s,cfg);
+    }
+    defer allocator.free(cur_rules);
 
-    var key: []u8 = undefined;
+    // load the auth pub keys
+    var new_pub: []u8 = undefined;
+    const new_pubpath = try mem.concat(allocator, u8, &[_][]const u8{ "pub.", new[0..] });
+    defer allocator.free(new_pubpath);
+    if (load_blob(allocator, cfg, req.id[0..], new_pubpath, 32)) |r| {
+        new_pub = r;
+    } else |err| {
+        fail(s,cfg);
+    }
+    defer allocator.free(new_pub);
+    var cur_pub: []u8 = undefined;
+    if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |r| {
+        cur_pub = r;
+    } else |err| {
+        fail(s,cfg);
+    }
+    defer allocator.free(cur_pub);
+
+    // and last the keys
+    var new_key: []u8 = undefined;
+    if (load_blob(s_allocator, cfg, req.id[0..], new[0..], 32)) |r| {
+        new_key = r;
+    } else |err| {
+        fail(s,cfg);
+    }
+    var cur_key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |r| {
-        key = r;
+        cur_key = r;
     } else |err| {
-        bail = true;
+        s_allocator.free(new_key);
+        fail(s,cfg);
     }
 
-    var rules: []u8 = undefined;
-    if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], null)) |r| {
-        rules = r;
-    } else |err| {
-        bail = true;
-    }
+    // we need to construct the filenames of the old rules/authpubkey
+    const old_pubpath = try mem.concat(allocator, u8, &[_][]const u8{ "pub.", old[0..] });
+    defer allocator.free(old_pubpath);
+    const old_rulespath = try mem.concat(allocator, u8, &[_][]const u8{ "rules.", old[0..] });
+    defer allocator.free(old_rulespath);
 
-    if (bail) fail(s, cfg);
-
-    var beta = [_]u8{0} ** 32;
-
-    if (-1 == sphinx.sphinx_respond(&req.alpha, k.ptr, &beta)) fail(s, cfg);
-
-    var resp = try allocator.alloc(u8, beta.len + rules.len);
-    defer allocator.free(resp);
-
-    std.mem.copy(u8, resp[0..beta.len], beta[0..]);
-    std.mem.copy(u8, resp[beta.len..], rules[0..]);
-    allocator.free(rules);
-
-    _ = try s.write(resp[0..]);
-    try s.flush();
-
-    var buf: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rule, signature
-    //# wait for auth signing pubkey and rules
-    const msglen = try s.read(buf[0..buf.len]);
-    if (msglen != buf.len) fail(s, cfg);
-
-    const ChangeResp = packed struct {
-        pk: [32]u8, rule: [RULE_SIZE]u8, signature: [64]u8
+    // first save the keys
+    save_blob(cfg, req.id[0..], old, cur_key) catch {
+        s_allocator.free(cur_key);
+        s_allocator.free(new_key);
+        fail(s, cfg);
     };
-    const cresp: *ChangeResp = @ptrCast(*ChangeResp, buf[0..]);
+    s_allocator.free(cur_key);
 
-    const blob = verify_blob(buf[0..], cresp.pk) catch fail(s, cfg);
-    rules = blob[32..];
+    save_blob(cfg, req.id[0..], "key", new_key) catch {
+        s_allocator.free(new_key);
+        fail(s, cfg);
+    };
+    s_allocator.free(new_key);
 
-    save_blob(cfg, req.id[0..], old, key) catch fail(s, cfg);
-    s_allocator.free(key);
-    save_blob(cfg, req.id[0..], "key", k) catch fail(s, cfg);
-    s_allocator.free(k);
-    save_blob(cfg, req.id[0..], "pub", cresp.pk[0..]) catch fail(s, cfg);
-    save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
+    // now save the rules and pubkeys
+    save_blob(cfg, req.id[0..], old_rulespath, cur_rules) catch fail(s, cfg);
+    save_blob(cfg, req.id[0..], old_pubpath, cur_pub) catch fail(s, cfg);
 
-    const npath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
-    defer allocator.free(npath);
+    save_blob(cfg, req.id[0..], "rules"[0..], new_rules) catch fail(s, cfg);
+    save_blob(cfg, req.id[0..], "pub"[0..], new_pub) catch fail(s, cfg);
 
-    std.os.unlink(npath) catch fail(s, cfg);
+    // delete the previously "new" files
+    const nkpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
+    std.os.unlink(nkpath) catch fail(s, cfg);
+    allocator.free(nkpath);
 
+    const nppath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "pub.", new });
+    std.os.unlink(nppath) catch fail(s, cfg);
+    allocator.free(nppath);
+
+    const nrpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "rules.", new });
+    std.os.unlink(nrpath) catch fail(s, cfg);
+    allocator.free(nrpath);
+
+    // send ack
     _ = try s.write("ok");
     try s.flush();
 }
