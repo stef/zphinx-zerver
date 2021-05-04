@@ -676,6 +676,24 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
     }
 }
 
+fn read_pkt(s: anytype, buf: []u8) anyerror!usize {
+    var i: usize = 0;
+    while(i<buf.len) {
+        var r = try s.read(buf[i..]);
+        i+=r;
+    }
+    return i;
+}
+
+fn write_pkt(s: anytype, buf: []const u8) anyerror!usize {
+    var i: usize = 0;
+    while(i<buf.len) {
+        var r = try s.write(buf[i..]);
+        i+=r;
+    }
+    return i;
+}
+
 /// some operations in the protocol store a encrypted blob under an id
 /// when such a blob is being updated it is first returned - if it
 /// exists - to the client the client then updates the blob and sends
@@ -710,7 +728,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         std.mem.set(u8, blob, 0);
         new = true;
     }
-    const bw = s.write(blob) catch fail(s, cfg);
+    const bw = write_pkt(s, blob) catch fail(s, cfg);
     allocator.free(blob);
     if (bw != blob.len) fail(s, cfg);
     try s.flush();
@@ -727,11 +745,12 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         if (x != 2) fail(s, cfg);
         const bloblen = std.mem.readIntBig(u16, buf[32..34]);
         // read blob
-        const blobsize = try s.read(buf[34 .. 34 + bloblen + 64]);
-        if (bloblen + 64 != blobsize) fail(s, cfg);
-        const msg = buf[0 .. 32 + 2 + bloblen + 64];
+        const end = 34 + @as(u17,bloblen) + 64;
+        const recvd = read_pkt(s, buf[34..end]) catch fail(s,cfg);
+        if(recvd != end - 34) fail(s,cfg);
+        const msg = buf[0 .. end];
         const tmp = verify_blob(msg, pk.*) catch fail(s, cfg);
-        const new_blob = tmp[32 .. 32 + 2 + bloblen];
+        const new_blob = tmp[32 .. end - 64];
         if (!utils.dir_exists(cfg.datadir)) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
@@ -750,9 +769,10 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         if (load_blob(allocator, cfg, hexid[0..], "pub"[0..], 32)) |k| {
             pk = k;
         } else |err| {
+            fail(s,cfg);
             // fake pubkey
-            pk = try allocator.alloc(u8, 32);
-            sodium.randombytes_buf(pk[0..].ptr, pk.len);
+            //pk = try allocator.alloc(u8, 32);
+            //sodium.randombytes_buf(pk[0..].ptr, pk.len);
         }
         defer allocator.free(pk);
 
@@ -761,12 +781,13 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         const x = try s.read(buf[0..2]);
         if (x != 2) fail(s, cfg);
         const bloblen = std.mem.readIntBig(u16, buf[0..2]);
+        const end = 2 + @as(u17,bloblen) + 64;
         // read blob
-        const blobsize = try s.read(buf[2 .. 2 + bloblen + 64]);
-        if (bloblen + 64 != blobsize) fail(s, cfg);
-        const msg = buf[0 .. 2 + bloblen + 64];
+        const recvd = read_pkt(s, buf[2..end]) catch fail(s,cfg);
+        if(recvd != end - 2) fail(s,cfg);
+        const msg = buf[0 .. end];
         const tmp = verify_blob(msg, pk[0..32].*) catch fail(s, cfg);
-        const new_blob = tmp[0 .. 2 + bloblen];
+        const new_blob = tmp[0 .. end - 64];
         save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
     }
 }
