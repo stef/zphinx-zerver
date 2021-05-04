@@ -945,37 +945,40 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
+    var alpharule: [32 + RULE_SIZE]u8 = undefined; // alpha, rule
+    //# wait for alpha and rules
+    const msglen = try s.read(alpharule[0..]);
+    if (msglen != alpharule.len) {
+         fail(s, cfg);
+    }
+
+    const alpha = alpharule[0..32];
+    const rules = alpharule[32..];
+
     var key = [_]u8{0} ** 32;
     if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
     sodium.randombytes_buf(&key, 32);
 
     //var beta: [32]u8 = undefined;
     var beta = [_]u8{0} ** 32;
+    if (-1 == sphinx.sphinx_respond(alpha, &key, &beta)) fail(s, cfg);
 
-    if (-1 == sphinx.sphinx_respond(&req.alpha, &key, &beta)) fail(s, cfg);
+    const betalen = try s.write(beta[0..]);
+    try s.flush();
+    if(betalen!=beta.len) fail(s,cfg);
 
-    var rules: []u8 = undefined;
-    //# 1st step OPRF with a new seed
-    //# this might be if the user already has stored a blob for this id
-    //# and now also wants a sphinx rwd
-    if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], null)) |r| {
-        rules = r;
-    } else |err| {
-        fail(s, cfg);
-    }
-
-    var resp = try allocator.alloc(u8, beta.len + rules.len);
-    defer allocator.free(resp);
-
-    std.mem.copy(u8, resp[0..beta.len], beta[0..]);
-    std.mem.copy(u8, resp[beta.len..], rules[0..]);
-
-    allocator.free(rules);
+    var signedpub: [32 + 64]u8 = undefined; // pubkey, sig
+    const signedpublen = try s.read(signedpub[0..]);
+    if(signedpublen != signedpub.len) fail(s,cfg);
+    const pk = signedpub[0..32];
+    _ = verify_blob(signedpub[0..], pk.*) catch fail(s, cfg);
 
     save_blob(cfg, req.id[0..], "new", key[0..]) catch fail(s, cfg);
     _ = sodium.sodium_munlock(&key,32);
+    save_blob(cfg, req.id[0..], "rules.new", rules[0..]) catch fail(s, cfg);
+    save_blob(cfg, req.id[0..], "pub.new", pk[0..]) catch fail(s, cfg);
 
-    _ = try s.write(resp[0..]);
+    _ = try s.write("ok");
     try s.flush();
 }
 
