@@ -1,0 +1,65 @@
+# Copyright (C) 2018 The Android Open Source Project
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+write: 1
+read: 1
+rt_sigprocmask: 1
+close: 1
+open: 1
+madvise: 1
+mlock: 1
+fstat: 1
+accept4: 1
+mmap: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+openat: 1
+munlock: 1
+getrandom: 1
+wait4: 1
+fork: 1
+gettid: 1
+exit_group: 1
+mkdir: 1
+rt_sigaction: 1
+ioctl: arg1 == TIOCGWINSZ
+fcntl: 1
+mprotect: arg2 in ~PROT_EXEC || arg2 in ~PROT_WRITE
+unlinkat: 1
+dup2: 1
+brk: 1
+shutdown: 1
+munmap: 1
+unlink: 1
+stat: 1
+arch_prctl: 1
+set_tid_address: 1
+execve: 1
+readv: 1
+getdents64: 1
+pipe2: 1
+getuid: 1
+getgid: 1
+setgid: 1
+setuid: 1
+getpid: 1
+getppid: 1
+uname: 1
+writev: 1
+setsockopt: 1
+socket: arg0 == AF_INET
+bind: 1
+listen: 1
+getsockname: 1
+restart_syscall: 1
+exit: 1
+rt_sigreturn: 1
