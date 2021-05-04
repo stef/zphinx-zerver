@@ -844,36 +844,13 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 /// this op creates an oprf key, stores it with an associated pubkey
 /// of the client, and updates a blob.
 fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    const rulespath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..], "/rules" });
-    defer allocator.free(rulespath);
+    const tdir = mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..]}) catch fail(s,cfg);
+    defer allocator.free(tdir);
+    if (utils.dir_exists(tdir)) fail(s,cfg);
 
-    if (cfg.verbose) warn("rulespath: {}\n", .{rulespath});
-    //# check if id is unique
-    if (std.os.open(rulespath, 0, 0)) |f| {
-        std.os.close(f);
-        fail(s, cfg);
-    } else |err| {
-        if (err != error.FileNotFound) {
-            warn("fd: {}\n", .{err});
-            fail(s, cfg);
-        }
-    }
-
-    var key: []u8 = undefined;
-    // 1st step OPRF with a new seed
-    // this might be if the user already has stored a blob for this id
-    // and now also wants a sphinx rwd
-    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
-        key = k;
-    } else |err| {
-        if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {}/{}/key error: {}\n", .{ cfg.datadir, req.id, err });
-            fail(s, cfg);
-        }
-        key = try s_allocator.alloc(u8, 32);
-        sodium.randombytes_buf(key.ptr, key.len);
-    }
+    var key: []u8 = try s_allocator.alloc(u8, 32);
     defer s_allocator.free(key);
+    sodium.randombytes_buf(key.ptr, key.len);
 
     var beta = [_]u8{0} ** 32;
 
@@ -897,27 +874,18 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     const blob = verify_blob(buf[0..], resp.pk) catch fail(s, cfg);
     const rules = blob[32..];
 
-    // check if pubkey already exists, then we can skip the
-    // following mkdirs, and we *must* verify that the pubkey in the
-    // storage is the same as in the response.
-    if (load_blob(s_allocator, cfg, req.id[0..], "pub"[0..], 32)) |pk| {
-        if(sodium.sodium_memcmp(pk.ptr,resp.pk[0..], pk.len)!=0) fail(s,cfg);
-    } else |err| {
-        if (!utils.dir_exists(cfg.datadir)) {
-            std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
-        }
-        const tdir = rulespath[0 .. rulespath.len - 6];
-        if (!utils.dir_exists(tdir)) {
-            std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
-        }
-        save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
-    }
-    save_blob(cfg, req.id[0..], "key", key) catch fail(s, cfg);
-    save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
-
     // 3rd phase
     // add user to host record
     update_blob(cfg, s) catch fail(s, cfg);
+
+    if (!utils.dir_exists(cfg.datadir)) {
+        std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
+    }
+    std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
+
+    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
+    save_blob(cfg, req.id[0..], "key", key) catch fail(s, cfg);
+    save_blob(cfg, req.id[0..], "rules", rules) catch fail(s, cfg);
 
     _ = try s.write("ok");
     try s.flush();
