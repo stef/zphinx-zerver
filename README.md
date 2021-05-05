@@ -54,8 +54,13 @@ https://github.com/D3vl0per/zphinx-zerver-docker
 
 to create x509 cert/server key run this - **ONLY** for testing/demo, in production use real certs/keys!!!!
 ```
-openssl req -new -x509 -key server.der -keyform DER -out cert.pem -days 360
+openssl ecparam -genkey -out ssl_key.pem -name secp384r1
+openssl req -new -nodes -x509 -sha256 -key ssl_key.pem -out ssl_cert.pem -days 365 -subj '/CN=localhost'
 ```
+Note currently zphinx only supports ECDSA key material. If other types of keys
+are required, uncomment the line containing `c.br_ssl_server_init_full_ec` in
+`oracle.zig` - and comment out the following line containing
+`...br_ssl_server_init_minf2c(...`.
 
 set your config in one of these files (later files over-ride earlier locations
 in this list):
