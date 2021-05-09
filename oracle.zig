@@ -265,7 +265,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
     var op: [1]u8 = undefined;
     _ = try s.read(op[0..]);
 
-    warn("rl op {}\n", .{op[0]});
+    warn("rl op {x}\n", .{op[0]});
 
     switch (@intToEnum(ChallengeOp, op[0])) {
         ChallengeOp.SPHINX_CREATE => {
@@ -295,14 +295,16 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     var reqlen : usize = 0;
     _ = try s.read(req[0..1]);
 
-    warn("req op {}\n", .{req[0]});
+    warn("req op {x}\n", .{@intToEnum(ReqType, req[0])});
 
     if(@intToEnum(ReqType, req[0])==ReqType.READ) {
         _ = try s.read(req[1..33]);
         reqlen = 33;
+        warn("cc: {x:0>66}", .{req[0..33]});
     } else {
         _ = try s.read(req[1..65]);
         reqlen = 65;
+        warn("cc: {x:0>130}", .{req[0..65]});
     }
 
     // load MAC key
@@ -326,6 +328,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     challenge.ts = now;
 
     const request = parse_req(cfg, s, req[0..reqlen]);
+    if(cfg.verbose) warn("id: {}\n", .{request.id[0..]});
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(*RatelimitCTX, diff[0..]);
@@ -707,27 +710,56 @@ fn write_pkt(s: anytype, buf: []const u8) anyerror!usize {
 /// blob. using the pubkey we verify the signed blob and store it.
 fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     // the id under which the blob is stored.
-    var idbuf = [_]u8{0} ** 32;
+    var signedid = [_]u8{0} ** (32+64);
     //# wait for auth signing pubkey and rules
-    const idlen = try s.read(idbuf[0..idbuf.len]);
-    if (idlen != idbuf.len) fail(s, cfg);
+    const idlen = try s.read(signedid[0..signedid.len]);
+    if (idlen != signedid.len) fail(s, cfg);
 
-    const hexid = try tohexid(idbuf[0..].*);
+    warn("ub: {x:0>192}", .{signedid});
+
+    const hexid = try tohexid(signedid[0..32].*);
     defer allocator.free(hexid);
 
     var blob: []u8 = undefined;
     var new = false;
-    if (load_blob(allocator, cfg, hexid[0..], "blob"[0..], null)) |b| {
-        blob = b;
+
+    var pk: [32]u8 = undefined;
+    if (load_blob(allocator, cfg, hexid[0..], "pub"[0..], 32)) |k| {
+        pk = k[0..32].*;
+        // verify sig on id
+        _ = verify_blob(signedid[0..], pk) catch fail(s, cfg);
+
+        if (load_blob(allocator, cfg, hexid[0..], "blob"[0..], null)) |b| {
+            blob = b;
+        } else |err| {
+            if (err != error.FileNotFound) {
+                if (cfg.verbose) warn("cannot open {}/{}/blob error: {}\n", .{ cfg.datadir, hexid, err });
+                fail(s, cfg);
+            }
+            warn("user blob authkey fund, but no blob for id: {}\n", .{hexid});
+            fail(s,cfg);
+        }
     } else |err| {
         if (err != error.FileNotFound) {
             if (cfg.verbose) warn("cannot open {}/{}/blob error: {}\n", .{ cfg.datadir, hexid, err });
             fail(s, cfg);
         }
+        // ensure that the blob record directory also doesn't exist
+        const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
+        defer allocator.free(tdir);
+        if (utils.dir_exists(tdir)) {
+            warn("user blob authkey not found, but dir exists: {}\n", .{hexid});
+            fail(s,cfg);
+        }
+
         blob = try allocator.alloc(u8, 2);
         std.mem.set(u8, blob, 0);
         new = true;
+        // fake pubkey
+        //pk = try allocator.alloc(u8, 32);
+        //sodium.randombytes_buf(pk[0..].ptr, pk.len);
     }
+
     const bw = write_pkt(s, blob) catch fail(s, cfg);
     allocator.free(blob);
     if (bw != blob.len) fail(s, cfg);
@@ -738,7 +770,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         // read pubkey
         const pklen = try s.read(buf[0..32]);
         if (pklen != 32) fail(s, cfg);
-        const pk = buf[0..32];
+        pk = buf[0..32].*;
 
         // read blob size
         const x = try s.read(buf[32..34]);
@@ -749,7 +781,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         const recvd = read_pkt(s, buf[34..end]) catch fail(s,cfg);
         if(recvd != end - 34) fail(s,cfg);
         const msg = buf[0 .. end];
-        const tmp = verify_blob(msg, pk.*) catch fail(s, cfg);
+        const tmp = verify_blob(msg, pk) catch fail(s, cfg);
         const new_blob = tmp[32 .. end - 64];
         if (!utils.dir_exists(cfg.datadir)) {
             std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
@@ -761,21 +793,10 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         if (!utils.dir_exists(tdir)) {
             std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
         }
-        save_blob(cfg, hexid[0..], "pub", pk) catch fail(s, cfg);
+        save_blob(cfg, hexid[0..], "pub", pk[0..]) catch fail(s, cfg);
         save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
     } else {
         // read pubkey
-        var pk: []u8 = undefined;
-        if (load_blob(allocator, cfg, hexid[0..], "pub"[0..], 32)) |k| {
-            pk = k;
-        } else |err| {
-            fail(s,cfg);
-            // fake pubkey
-            //pk = try allocator.alloc(u8, 32);
-            //sodium.randombytes_buf(pk[0..].ptr, pk.len);
-        }
-        defer allocator.free(pk);
-
         var buf = [_]u8{0} ** (2 + 64 + 65536);
         // read blob size
         const x = try s.read(buf[0..2]);
