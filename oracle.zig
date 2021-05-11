@@ -31,7 +31,7 @@ pub const wordexp = @cImport({
 ///   16 - the mac of the data
 ///------
 /// + 42
-const RULE_SIZE = 42;
+const RULE_SIZE = 62;
 
 /// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
@@ -966,15 +966,13 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
-    var alpharule: [32 + RULE_SIZE]u8 = undefined; // alpha, rule
-    //# wait for alpha and rules
-    const msglen = try s.read(alpharule[0..]);
-    if (msglen != alpharule.len) {
+    var alpha: [32]u8 = undefined;
+    // wait for alpha
+    const msglen = try s.read(alpha[0..]);
+    if (msglen != alpha.len) {
          fail(s, cfg);
     }
 
-    const alpha = alpharule[0..32];
-    const rules = alpharule[32..];
 
     var key = [_]u8{0} ** 32;
     if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
@@ -982,17 +980,19 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 
     //var beta: [32]u8 = undefined;
     var beta = [_]u8{0} ** 32;
-    if (-1 == sphinx.sphinx_respond(alpha, &key, &beta)) fail(s, cfg);
+    if (-1 == sphinx.sphinx_respond(&alpha, &key, &beta)) fail(s, cfg);
 
     const betalen = try s.write(beta[0..]);
     try s.flush();
     if(betalen!=beta.len) fail(s,cfg);
 
-    var signedpub: [32 + 64]u8 = undefined; // pubkey, sig
+    var signedpub: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rules, sig
     const signedpublen = try s.read(signedpub[0..]);
     if(signedpublen != signedpub.len) fail(s,cfg);
     const pk = signedpub[0..32];
     _ = verify_blob(signedpub[0..], pk.*) catch fail(s, cfg);
+
+    const rules = signedpub[32..32+RULE_SIZE];
 
     save_blob(cfg, req.id[0..], "new", key[0..]) catch fail(s, cfg);
     _ = sodium.sodium_munlock(&key,32);
