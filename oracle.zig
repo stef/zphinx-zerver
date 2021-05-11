@@ -26,11 +26,11 @@ pub const wordexp = @cImport({
 // todo bug: create, write, delete, read - should read still work?
 
 /// The size of an encrypted pwd gen rule
-///    2 - the size of the rule itself
+///    6 - the size of the rule itself
 ///   24 - the nonce for encryption
-///   16 - the mac of the data
+///   32 - the xor_mask
 ///------
-/// + 42
+/// + 62
 const RULE_SIZE = 62;
 
 /// normal non-sensitive allocator
