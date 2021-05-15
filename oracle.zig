@@ -29,9 +29,10 @@ pub const wordexp = @cImport({
 ///    6 - the size of the rule itself
 ///   24 - the nonce for encryption
 ///   32 - the xor_mask
+///   16 - the auth tag
 ///------
-/// + 62
-const RULE_SIZE = 62;
+/// + 78
+const RULE_SIZE = 78;
 
 /// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
