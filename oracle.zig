@@ -23,8 +23,6 @@ pub const wordexp = @cImport({
     @cInclude("wordexp.h");
 });
 
-// todo bug: create, write, delete, read - should read still work?
-
 /// The size of an encrypted pwd gen rule
 ///    6 - the size of the rule itself
 ///   24 - the nonce for encryption
