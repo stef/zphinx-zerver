@@ -14,42 +14,20 @@ also shouts to https://github.com/MasterQ32/zig-bearssl for the original bearssl
 
 You need at least zig 0.7.1 do build this.
 
-You will also need:
- - libsphinx: https://github.com/stef/libsphinx
- - libequihash: https://github.com/stef/equihash/
+You will also need libequihash from: https://github.com/stef/equihash/
 
-if you get errors complaining about missing `sodium.h` apply the `sphinx.patch`
-in the sphinx submodule.
+Make sure that `libequihash.pc` and `sodium.pc` are available in
+`/usr/share/pkgconfig/` since zig seems to not be able to find other
+distro-specific directories like `/usr/lib/x86_64-linux-gnu/pkgconfig/`
 
-on a musl-based system just run `zig build -Drelease-safe=true` and be happy.
+On a musl-based system just run `zig build -Drelease-safe=true` and be happy.
 
-on debian or other glibc-based systems due to
-https://github.com/ziglang/zig/issues/6469, you might have to edit `build.zig` and in this part
+On a production debian system this should work: `zig build install --prefix . -Drelease-safe=true -Dtarget=x86_64-linux-gnu.2.25`
 
+You might want to give permission to bind to ports below 1024:
 ```
-    // on normal systems this is ok:
-    exe.linkSystemLibrary("sodium");
-    // on debian, you have to do this:
-    // exe.addObjectFile("/usr/lib/x86_64-linux-gnu/libsodium.a");
+sudo setcap 'cap_net_bind_service=+ep' ./bin/oracle
 ```
-
-Set the correct path to your static libsodium lib and uncomment this line.
-While you have to comment out the line containing:
-
-```
-    exe.linkSystemLibrary("sodium");
-```
-
-so that the result looks like this:
-
-```
-    // on normal systems this is ok:
-    // exe.linkSystemLibrary("sodium");
-    // on debian, you have to do this:
-    exe.addObjectFile("/usr/lib/x86_64-linux-gnu/libsodium.a");
-```
-
-finally you need to run `zig build -Drelease-safe=true -Dtarget=x86_64-linux-gnu.2.25`
 
 ## Running
 
@@ -73,3 +51,11 @@ in this list):
  - `~/.config/sphinx/config`
  - `~/.sphinxrc`
  - `./sphinx.cfg`
+
+In case you want some logging to stdout to feed your favorite daemontools-like
+logger run oracle like this:
+
+```
+./bin/oracle 2>&1 | /usr/bin/ts
+```
+
