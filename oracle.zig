@@ -164,7 +164,7 @@ pub fn main() anyerror!void {
     };
 
     var srv = net.StreamServer.init(opt);
-    var addr = try net.Address.parseIp4(cfg.address, cfg.port);
+    var addr = try net.Address.parseIp(cfg.address, cfg.port);
 
     srv.listen(addr) catch unreachable;
 
