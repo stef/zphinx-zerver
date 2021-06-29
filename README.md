@@ -14,6 +14,10 @@ also shouts to https://github.com/MasterQ32/zig-bearssl for the original bearssl
 
 You need at least zig 0.7.1 do build this.
 
+You will also need:
+ - libsphinx: https://github.com/stef/libsphinx
+ - libequihash: https://github.com/stef/equihash/
+
 if you get errors complaining about missing `sodium.h` apply the `sphinx.patch`
 in the sphinx submodule.
 
