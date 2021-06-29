@@ -6,16 +6,13 @@ pub fn build(b: *Builder) void {
     const exe = b.addExecutable("oracle", "oracle.zig");
     exe.setBuildMode(mode);
 
-    // on normal systems this is ok:
-    //exe.linkSystemLibrary("sodium");
-    // on debian, you have to do this:
-    exe.addObjectFile("/usr/lib/x86_64-linux-gnu/libsodium.a");
-
-    exe.linkSystemLibrary("equihash");
+    exe.addIncludeDir(".");
+    exe.addSystemIncludeDir("/usr/include");
+    exe.addLibPath("/usr/lib");
 
     exe.linkLibC();
-
-    exe.addIncludeDir(".");
+    exe.linkSystemLibrary("sodium");
+    exe.linkSystemLibrary("equihash");
 
     const bear = b.addStaticLibrary("bear", null);
     linkBearSSL(".", bear, target);
