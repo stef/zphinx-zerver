@@ -11,6 +11,8 @@ pub fn build(b: *Builder) void {
     // on debian, you have to do this:
     exe.addObjectFile("/usr/lib/x86_64-linux-gnu/libsodium.a");
 
+    exe.linkSystemLibrary("equihash");
+
     exe.linkLibC();
 
     exe.addIncludeDir(".");
