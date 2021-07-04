@@ -11,7 +11,7 @@ libdirs=$(echo "$libs" | sed 's;\(/.*/\).*;\1;' | sort -u)
 mkdirs=$(echo "$libdirs" | sed 's;\(.*\);--dir \1;')
 libinds=$(echo "$libs" | sed 's;\(.*\);--ro-bind \1 \1;')
 
-source "$2"
+source "$2" 2>/dev/null
 
 # clear environment
 env -i \
@@ -30,6 +30,7 @@ bwrap --unshare-all \
 ssl_key="key.pem"
 ssl_cert="cert.pem"
 port=${port:-2355}
+address="${address:-::}"
 timeout=${timeout:-3}
 datadir="data"
 max_kids=${max_kids:-5}
