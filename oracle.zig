@@ -67,6 +67,7 @@ const ChallengeOp = enum(u8) {
     SPHINX_CREATE = 0,
     CHALLENGE_CREATE = 0x5a,
     VERIFY = 0xa5,
+    _,
 };
 
 const Hardness = struct {
@@ -281,6 +282,9 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
         },
         ChallengeOp.VERIFY => {
             try verify_challenge(cfg, s);
+        },
+        _ => {
+            if (cfg.verbose) warn("{} invalid ratelimit op. aborting.\n",.{conn.address});
         }
     }
     try s.close();
