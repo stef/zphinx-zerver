@@ -188,7 +188,7 @@ pub fn main() anyerror!void {
                 const rc = os.system.waitpid(-1, &status, os.WNOHANG);
                 if(rc>0) {
                     kids.delete(mem.asBytes(&rc));
-                    if(cfg.verbose) warn("removing done kid {} from pool\n",.{rc});
+                    if(cfg.verbose) warn("removing kid {} from pool\n",.{rc});
                 }
                 continue;
             }
@@ -261,11 +261,25 @@ fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
 }
 
 fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
-    warn("ratelimit start\n", .{});
+    //warn("ratelimit start\n", .{});
     var op: [1]u8 = undefined;
-    _ = try s.read(op[0..]);
+    _ = s.read(op[0..]) catch |err| {
+        if(err==ssl.BearError.UNSUPPORTED_VERSION) {
+           warn("{} unsupported TLS version. aborting.\n",.{conn.address});
+           try s.close();
+           os.exit(0);
+        } else if(err==ssl.BearError.UNKNOWN_ERROR_582 or err==ssl.BearError.UNKNOWN_ERROR_552) {
+           warn("{} unknown TLS error: {}. aborting.\n",.{conn.address, err});
+           try s.close();
+           os.exit(0);
+        } else if(err==ssl.BearError.BAD_VERSION) {
+           warn("{} bad TLS version. aborting.\n",.{conn.address});
+           try s.close();
+           os.exit(0);
+        }
+    };
 
-    warn("rl op {x}\n", .{op[0]});
+    //if (cfg.verbose) warn("rl op {x}\n", .{op[0]});
 
     switch (@intToEnum(ChallengeOp, op[0])) {
         ChallengeOp.SPHINX_CREATE => {
@@ -275,12 +289,15 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
                 warn("invalid create request. aborting.\n",.{});
             }
             const request = parse_req(cfg, s, req[0..]);
+            if (cfg.verbose) warn("{} sphinx op create {}\n", .{conn.address, request.id});
             try handler(cfg, s, request);
         },
         ChallengeOp.CHALLENGE_CREATE => {
+            if (cfg.verbose) warn("{} rl op challenge\n", .{conn.address});
             try create_challenge(cfg, s);
         },
         ChallengeOp.VERIFY => {
+            if (cfg.verbose) warn("{} rl op solve\n", .{conn.address});
             try verify_challenge(cfg, s);
         },
         _ => {
@@ -298,16 +315,16 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     var reqlen : usize = 0;
     _ = try s.read(req[0..1]);
 
-    warn("req op {x}\n", .{@intToEnum(ReqType, req[0])});
+    warn("create_challenge for req op {x} ", .{@intToEnum(ReqType, req[0])});
 
     if(@intToEnum(ReqType, req[0])==ReqType.READ) {
         _ = try s.read(req[1..33]);
         reqlen = 33;
-        warn("cc: {x:0>66}", .{req[0..33]});
+        //if (cfg.verbose) warn("cc: {x:0>66} ", .{req[0..33]});
     } else {
         _ = try s.read(req[1..65]);
         reqlen = 65;
-        warn("cc: {x:0>130}", .{req[0..65]});
+        //if (cfg.verbose) warn("cc: {x:0>130} ", .{req[0..65]});
     }
 
     // load MAC key
@@ -316,7 +333,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         key = k;
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {}/key error: {}\n", .{ cfg.datadir, err });
+            if (cfg.verbose) warn("\ncannot open {}/key error: {}\n", .{ cfg.datadir, err });
             fail(s, cfg);
         }
         key = try s_allocator.alloc(u8, 32);
@@ -335,7 +352,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(*RatelimitCTX, diff[0..]);
-        warn("rl ctx {}\n", .{ctx});
+        //if (cfg.verbose) warn("rl ctx {}\n", .{ctx});
         if(ctx.level >= Difficulties.len) {
             // invalid rl context, punish hard
             if (cfg.verbose) warn("invalid difficulty: {}\n", .{ ctx.level });
@@ -363,8 +380,14 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         challenge.n=Difficulties[ctx.level].n;
         challenge.k=Difficulties[ctx.level].k;
 
-        if((ctx.level == Difficulties.len - 1) and ctx.count>cfg.rl_threshold*2) {
-            warn("\x1b[38;5;196malert\x1b[38;5;253m: someones trying ({}) really hard at: {}\n", .{ctx.count, request.id});
+        if(ctx.level > 0) {
+           if(ctx.level < Difficulties.len / 2) {
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({}) at: {}\n", .{conn.address, ctx.level, request.id});
+           } else if((ctx.level > Difficulties.len / 2) and ctx.level < (Difficulties.len - 1)) {
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard at: {}\n", .{conn.address, ctx.level, request.id});
+           } else {
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard at: {}\n", .{conn.address, ctx.level, ctx.count, request.id});
+           }
         }
 
     } else |err| {
@@ -480,6 +503,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
 /// dispatcher for incoming client requests
 /// parses incoming request and calls appropriate op
 fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
+    if (cfg.verbose) warn("{} sphinx op {} {}\n", .{conn.address, req.op, req.id});
     switch (req.op) {
         ReqType.CREATE => {
             try create(cfg, s, req);
