@@ -65,6 +65,8 @@ pub const BearError = error{
     X509_FORBIDDEN_KEY_USAGE,
     X509_WEAK_PUBLIC_KEY,
     X509_NOT_TRUSTED,
+    UNKNOWN_ERROR_552,
+    UNKNOWN_ERROR_582,
 };
 
 pub fn convertError(err: c_int) BearError {
@@ -127,6 +129,8 @@ pub fn convertError(err: c_int) BearError {
         c.BR_ERR_X509_FORBIDDEN_KEY_USAGE => error.X509_FORBIDDEN_KEY_USAGE,
         c.BR_ERR_X509_WEAK_PUBLIC_KEY => error.X509_WEAK_PUBLIC_KEY,
         c.BR_ERR_X509_NOT_TRUSTED => error.X509_NOT_TRUSTED,
+        552 => error.UNKNOWN_ERROR_552,
+        582 => error.UNKNOWN_ERROR_582,
         else => std.debug.panic("missing error code: {}", .{err}),
     };
 }
