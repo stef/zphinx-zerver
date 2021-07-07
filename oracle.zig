@@ -630,7 +630,7 @@ fn loadcfg() anyerror!Config {
         }
     }
     if(cfg.rl_decay<1) {
-        warn("rl_decay must be positive number, please check your config.",.{});
+        warn("rl_decay must be positive number, please check your config.\n",.{});
         return LoadCfgError.InvalidRLDecay;
     }
     if (cfg.verbose) {
@@ -742,7 +742,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     const idlen = try s.read(signedid[0..signedid.len]);
     if (idlen != signedid.len) fail(s, cfg);
 
-    warn("ub: {x:0>192}", .{signedid});
+    //if(cfg.verbose) warn("ub: {x:0>192}\n", .{signedid});
 
     const hexid = try tohexid(signedid[0..32].*);
     defer allocator.free(hexid);
