@@ -167,7 +167,13 @@ pub fn main() anyerror!void {
     var srv = net.StreamServer.init(opt);
     var addr = try net.Address.parseIp(cfg.address, cfg.port);
 
-    srv.listen(addr) catch unreachable;
+    srv.listen(addr) catch |err| switch (err) {
+        error.AddressInUse => {
+            warn("port {} already in use.", .{cfg.port});
+            os.exit(1);
+        },
+        else => unreachable,
+    };
 
     const to = os.timeval{
         .tv_sec = cfg.timeout,
@@ -911,7 +917,7 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     //# wait for auth signing pubkey and rules
     const msglen = try s.read(buf[0..buf.len]);
     if (msglen != buf.len) {
-         fail(s, cfg);
+        fail(s, cfg);
     }
 
     const CreateResp = packed struct {
