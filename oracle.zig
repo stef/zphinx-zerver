@@ -30,7 +30,7 @@ pub const wordexp = @cImport({
 ///   16 - the auth tag
 ///------
 /// + 78
-const RULE_SIZE = 78;
+const RULE_SIZE = 79;
 
 /// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
