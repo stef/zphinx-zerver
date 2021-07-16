@@ -152,7 +152,7 @@ fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
 }
 
 /// classical forking server with tcp connection wrapped by bear ssl
-/// number of childs is configurable, as is the listening IPv4 address and port
+/// number of childs is configurable, as is the listening IP address and port
 pub fn main() anyerror!void {
     const cfg = try loadcfg();
     const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast([*c]const u8, cfg.ssl_key));
