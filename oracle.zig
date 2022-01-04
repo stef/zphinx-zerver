@@ -408,7 +408,10 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
             .count = 1,
             .ts = now,
         };
-        save_blob(cfg, request.id[0..], "difficulty"[0..], mem.asBytes(&ctx)[0..]) catch fail(s, cfg);
+        save_blob(cfg, request.id[0..], "difficulty"[0..], mem.asBytes(&ctx)[0..]) catch |err2| if (err2!=error.FileNotFound ) {
+            if (cfg.verbose) warn("cannot save {}/{}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
+            fail(s, cfg);
+        };
     }
 
     // sign challenge
