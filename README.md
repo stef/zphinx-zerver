@@ -12,6 +12,8 @@ also shouts to https://github.com/MasterQ32/zig-bearssl for the original bearssl
 
 ## Building
 
+The git repo's submodules need to be checked out recursively.
+
 You need at least zig 0.7.1 do build this.
 
 You will also need libequihash from: https://github.com/stef/equihash/
