@@ -12,46 +12,47 @@ const Allocator = mem.Allocator;
 
 pub fn SecretAllocator() type {
     return struct {
-        allocator: Allocator,
-        parent_allocator: *Allocator,
-
+        parent: Allocator,
         const Self = @This();
 
-        pub fn init(parent_allocator: *Allocator) Self {
-            return Self{
-                .allocator = Allocator{
-                    .allocFn = alloc,
-                    .resizeFn = resize,
-                },
-                .parent_allocator = parent_allocator,
+        pub fn init(parent: Allocator) Self {
+            return .{
+                .parent= parent,
             };
         }
 
+        pub fn allocator(self: *Self) Allocator {
+            return Allocator.init(self, alloc, resize, free);
+        }
 
-       fn alloc(allocator: *Allocator, len: usize, ptr_align: u29, len_align: u29, ra: usize,) error{OutOfMemory}![]u8 {
-           const self = @fieldParentPtr(Self, "allocator", allocator);
-           if(self.parent_allocator.allocFn(self.parent_allocator, len, ptr_align, len_align, ra)) |buff| {
-              if(buff.len >0) if(0!=sodium.sodium_mlock(@ptrCast(*c_void, buff),buff.len)) return mem.Allocator.Error.OutOfMemory;
+        fn alloc(self: *Self, len: usize, alignment: u29, len_align: u29, return_address: usize,) error{OutOfMemory}![]u8 {
+           if(self.parent.rawAlloc(len, alignment, len_align, return_address)) |buff| {
+              if(buff.len >0) if(0!=sodium.sodium_mlock(@ptrCast(*anyopaque, buff),buff.len)) return mem.Allocator.Error.OutOfMemory;
               return buff;
            } else |err| {
               return err;
            }
-       }
+        }
 
-       fn resize( allocator: *Allocator, buf: []u8, buf_align: u29, new_len: usize, len_align: u29, ra: usize,) error{OutOfMemory}!usize {
-           const self = @fieldParentPtr(Self, "allocator", allocator);
-           if(new_len==0) _=sodium.sodium_munlock(@ptrCast(*c_void, buf),buf.len);
+        fn resize(self: *Self, buf: []u8, buf_align: u29, new_len: usize, len_align: u29, return_address: usize,) ?usize {
+           if(new_len==0) _=sodium.sodium_munlock(@ptrCast(*anyopaque, buf),buf.len);
            // TODO FIXME what if new_len != buf.len != 0 // shrink or expand?
-           if(self.parent_allocator.resizeFn(self.parent_allocator, buf, buf_align, new_len, len_align, ra)) |bsize| {
-              if(buf.len>0) _=sodium.sodium_mlock(@ptrCast(*c_void, buf),bsize);
+           if(self.parent.rawResize(buf, buf_align, new_len, len_align, return_address)) |bsize| {
+              if(buf.len>0) _=sodium.sodium_mlock(buf.ptr, bsize);
               return bsize;
-           } else |err| {
-              return err;
            }
-       }
-   };
+           return null;
+        }
+
+        fn free(self: *Self, buf: []u8, buf_align: u29, return_address: usize) void {
+           _ = buf_align;
+           _ = return_address;
+           _ = sodium.sodium_munlock(buf.ptr,buf.len);
+           self.parent.rawFree(buf, buf_align, return_address);
+        }
+    };
 }
 
-pub fn secretAllocator(parent_allocator: *Allocator) SecretAllocator() {
-   return SecretAllocator().init(parent_allocator);
+pub fn secretAllocator(parent: Allocator) SecretAllocator() {
+    return SecretAllocator().init(parent);
 }

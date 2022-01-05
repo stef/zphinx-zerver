@@ -5,7 +5,7 @@ const os = std.os;
 const fs = std.fs;
 const mem = std.mem;
 const BufSet = std.BufSet;
-const warn = std.debug.warn;
+const warn = std.debug.print;
 const toml = @import("zig-toml/src/toml.zig");
 const ssl = @import("ssl.zig");
 const utils = @import("utils.zig");
@@ -36,7 +36,7 @@ const RULE_SIZE = 79;
 const allocator = std.heap.c_allocator;
 /// c_allocator for sensitive data, wrapping sodium_m(un)lock()
 var s_state = secret_allocator.secretAllocator(allocator);
-const s_allocator = &s_state.allocator;
+const s_allocator = s_state.allocator();
 
 /// server config data
 const Config = struct {
@@ -106,10 +106,13 @@ const ReqType = enum(u8) {
 
 /// initial request sent from client
 const Request = struct {
-    op: ReqType,   /// see enum above
-    id: [64]u8,     /// id is the hex string representation of the original [32]u8 id sent by the client
+    /// see enum above
+    op: ReqType,   
+    /// id is the hex string representation of the original [32]u8 id sent by the client
+    id: [64]u8,
     has_alpha: bool = true,
-    alpha: [32]u8,  /// the blinded password sent by the client.
+    /// the blinded password sent by the client.
+    alpha: [32]u8,
 };
 
 const ChallengeRequest = packed struct {
@@ -143,9 +146,9 @@ var conn: net.StreamServer.Connection = undefined;
 fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
     var accepted_addr: net.Address = undefined;
     var adr_len: os.socklen_t = @sizeOf(net.Address);
-    if (os.accept(self.sockfd.?, &accepted_addr.any, &adr_len, os.SOCK_CLOEXEC)) |fd| {
+    if (os.accept(self.sockfd.?, &accepted_addr.any, &adr_len, os.SOCK.CLOEXEC)) |fd| {
         return net.StreamServer.Connection{
-            .file = fs.File{ .handle = fd },
+            .stream = net.Stream{ .handle = fd },
             .address = accepted_addr,
         };
     } else |err| return err;
@@ -172,15 +175,18 @@ pub fn main() anyerror!void {
             warn("port {} already in use.", .{cfg.port});
             os.exit(1);
         },
-        else => unreachable,
+        else => {
+           return err;
+           //unreachable,
+        }
     };
 
     const to = os.timeval{
         .tv_sec = cfg.timeout,
         .tv_usec = 0
     };
-    try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_SNDTIMEO, mem.asBytes(&to));
-    try os.setsockopt(srv.sockfd.?, os.SOL_SOCKET, os.SO_RCVTIMEO, mem.asBytes(&to));
+    try os.setsockopt(srv.sockfd.?, os.SOL.SOCKET, os.SO.SNDTIMEO, mem.asBytes(&to));
+    try os.setsockopt(srv.sockfd.?, os.SOL.SOCKET, os.SO.RCVTIMEO, mem.asBytes(&to));
 
     var kids = BufSet.init(allocator);
 
@@ -189,11 +195,11 @@ pub fn main() anyerror!void {
             conn = c;
         } else |e| {
             if(e==error.WouldBlock) {
-                const Status = if (builtin.link_libc) c_uint else u32;
+                const Status = if (builtin.link_libc) c_int else u32;
                 var status: Status = undefined;
-                const rc = os.system.waitpid(-1, &status, os.WNOHANG);
+                const rc = os.system.waitpid(-1, &status, os.system.W.NOHANG);
                 if(rc>0) {
-                    kids.delete(mem.asBytes(&rc));
+                    kids.remove(mem.asBytes(&rc));
                     if(cfg.verbose) warn("removing kid {} from pool\n",.{rc});
                 }
                 continue;
@@ -205,7 +211,7 @@ pub fn main() anyerror!void {
             if (cfg.verbose) warn("waiting for kid to die\n", .{});
             const pid = std.os.waitpid(-1, 0).pid;
             if (cfg.verbose) warn("wait returned: {}\n", .{pid});
-            kids.delete(mem.asBytes(&pid));
+            kids.remove(mem.asBytes(&pid));
         }
 
         var pid = try os.fork();
@@ -220,12 +226,12 @@ pub fn main() anyerror!void {
                 if (ssl.c.br_ssl_server_reset(&sc) == 0) {
                     return ssl.convertError(ssl.c.br_ssl_engine_last_error(&sc.eng));
                 }
-                var s = ssl.initStream(&sc.eng, &conn.file, &conn.file);
+                var s = ssl.initStream(&sc.eng, &conn.stream, &conn.stream);
                 ratelimit(&cfg, &s) catch |err| {
                     if(err==error.WouldBlock or err==error.IO) {
                         if(cfg.verbose) warn("timeout, abort.\n",.{});
-                        _ = std.os.linux.shutdown(conn.file.handle, std.os.linux.SHUT_RDWR);
-                        conn.file.close();
+                        _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
+                        conn.stream.close();
                     } else {
                         return err;
                     }
@@ -234,8 +240,8 @@ pub fn main() anyerror!void {
 
             },
             else => {
-                try kids.put(mem.asBytes(&pid));
-                conn.file.close();
+                try kids.insert(mem.asBytes(&pid));
+                conn.stream.close();
             },
         }
     }
@@ -248,7 +254,7 @@ fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
         var req = allocator.create(Request) catch fail(s, cfg);
         req.op = ReqType.READ;
         req.has_alpha = false;
-        _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{msg[1..]}) catch fail(s, cfg);
+        _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{std.fmt.fmtSliceHexLower(msg[1..])}) catch fail(s, cfg);
         return req;
     }
 
@@ -262,7 +268,7 @@ fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
     var req = allocator.create(Request) catch fail(s, cfg);
     req.op = rreq.op;
     mem.copy(u8, req.alpha[0..], rreq.alpha[0..]);
-    _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{rreq.id}) catch fail(s, cfg);
+    _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{std.fmt.fmtSliceHexLower(rreq.id[0..])}) catch fail(s, cfg);
     return req;
 }
 
@@ -295,7 +301,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
                 warn("invalid create request. aborting.\n",.{});
             }
             const request = parse_req(cfg, s, req[0..]);
-            if (cfg.verbose) warn("{} sphinx op create {}\n", .{conn.address, request.id});
+            if (cfg.verbose) warn("{} sphinx op create {s}\n", .{conn.address, request.id});
             try handler(cfg, s, request);
         },
         ChallengeOp.CHALLENGE_CREATE => {
@@ -339,7 +345,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         key = k;
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("\ncannot open {}/key error: {}\n", .{ cfg.datadir, err });
+            if (cfg.verbose) warn("\ncannot open {s}/key error: {}\n", .{ cfg.datadir, err });
             fail(s, cfg);
         }
         key = try s_allocator.alloc(u8, 32);
@@ -354,7 +360,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     challenge.ts = now;
 
     const request = parse_req(cfg, s, req[0..reqlen]);
-    if(cfg.verbose) warn("id: {}\n", .{request.id[0..]});
+    if(cfg.verbose) warn("id: {s}\n", .{request.id[0..]});
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(*RatelimitCTX, diff[0..]);
@@ -388,17 +394,17 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
 
         if(ctx.level > 0) {
            if(ctx.level < Difficulties.len / 2) {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({}) at: {}\n", .{conn.address, ctx.level, request.id});
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({}) at: {s}\n", .{conn.address, ctx.level, request.id});
            } else if((ctx.level > Difficulties.len / 2) and ctx.level < (Difficulties.len - 1)) {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard at: {}\n", .{conn.address, ctx.level, request.id});
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard at: {s}\n", .{conn.address, ctx.level, request.id});
            } else {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard at: {}\n", .{conn.address, ctx.level, ctx.count, request.id});
+               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard at: {s}\n", .{conn.address, ctx.level, ctx.count, request.id});
            }
         }
 
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {}/{}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
+            if (cfg.verbose) warn("cannot open {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
             fail(s, cfg);
         }
         challenge.n = Difficulties[0].n;
@@ -408,14 +414,15 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
             .count = 1,
             .ts = now,
         };
+
         save_blob(cfg, request.id[0..], "difficulty"[0..], mem.asBytes(&ctx)[0..]) catch |err2| if (err2!=error.FileNotFound ) {
-            if (cfg.verbose) warn("cannot save {}/{}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
+            if (cfg.verbose) warn("cannot save {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
             fail(s, cfg);
         };
     }
 
     // sign challenge
-    const tosign = mem.asBytes(&challenge)[0..@byteOffsetOf(ChallengeRequest, "sig")];
+    const tosign = mem.asBytes(&challenge)[0..@offsetOf(ChallengeRequest, "sig")];
 
     var state : sodium.crypto_generichash_state = undefined;
     _ = sodium.crypto_generichash_init(&state, key.ptr, 32, 32);
@@ -453,12 +460,12 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     if (load_blob(s_allocator, cfg, ""[0..], "key"[0..], 32)) |k| {
         key = k;
     } else |err| {
-        if (cfg.verbose) warn("cannot open {}/key error: {}\n", .{ cfg.datadir, err });
+        if (cfg.verbose) warn("cannot open {s}/key error: {}\n", .{ cfg.datadir, err });
         fail(s, cfg);
     }
     defer s_allocator.free(key);
 
-    const tosign = mem.asBytes(&challenge)[0..@byteOffsetOf(ChallengeRequest, "sig")];
+    const tosign = mem.asBytes(&challenge)[0..@offsetOf(ChallengeRequest, "sig")];
     // todo check freshness of timestamp!
 
     var sig = [_]u8{0} ** challenge.sig.len;
@@ -512,7 +519,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
 /// dispatcher for incoming client requests
 /// parses incoming request and calls appropriate op
 fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
-    if (cfg.verbose) warn("{} sphinx op {} {}\n", .{conn.address, req.op, req.id});
+    if (cfg.verbose) warn("{} sphinx op {} {s}\n", .{conn.address, req.op, req.id});
     switch (req.op) {
         ReqType.CREATE => {
             try create(cfg, s, req);
@@ -552,7 +559,7 @@ fn fail(s: anytype, cfg: *const Config) noreturn {
     }
     _ = s.write("\x00\x04fail") catch unreachable;
     s.flush() catch unreachable;
-    _ = std.os.linux.shutdown(conn.file.handle, std.os.linux.SHUT_RDWR);
+    _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
     s.close() catch unreachable;
     os.exit(0);
 }
@@ -563,15 +570,15 @@ fn expandpath(path: []const u8) [:0]u8 {
     defer allocator.free(s);
     const r = wordexp.wordexp(s,&w, wordexp.WRDE_NOCMD|wordexp.WRDE_UNDEF);
     if(r!=0) {
-        warn("wordexp(\"{}\") returned error: {} - string not expanded\n", .{ s, r});
+        warn("wordexp(\"{s}\") returned error: {} - string not expanded\n", .{ s, r});
         return allocator.dupeZ(u8, path) catch unreachable;
     }
     defer wordexp.wordfree(&w);
     if(w.we_wordc!=1) {
-        warn("wordexp({}) not one word: {}\n", .{ s, w.we_wordc });
+        warn("wordexp({s}) not one word: {}\n", .{ s, w.we_wordc });
         os.exit(1);
     }
-    const word = std.mem.spanZ(@as([*c]u8, w.we_wordv[0]));
+    const word = std.mem.sliceTo(@as([*c]u8, w.we_wordv[0]),0);
     var cpy = allocator.dupeZ(u8, word) catch unreachable;
     return cpy;
 }
@@ -635,7 +642,7 @@ fn loadcfg() anyerror!Config {
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
-            warn("error loading config {}: {}\n", .{ filename, err });
+            warn("error loading config {s}: {}\n", .{ filename, err });
         }
     }
     if(cfg.rl_decay<1) {
@@ -643,11 +650,11 @@ fn loadcfg() anyerror!Config {
         return LoadCfgError.InvalidRLDecay;
     }
     if (cfg.verbose) {
-        warn("cfg.address: {}\n", .{cfg.address});
+        warn("cfg.address: {s}\n", .{cfg.address});
         warn("cfg.port: {}\n", .{cfg.port});
-        warn("cfg.datadir: {}\n", .{cfg.datadir});
-        warn("cfg.ssl_key: {}\n", .{cfg.ssl_key});
-        warn("cfg.ssl_cert: {}\n", .{cfg.ssl_cert});
+        warn("cfg.datadir: {s}\n", .{cfg.datadir});
+        warn("cfg.ssl_key: {s}\n", .{cfg.ssl_key});
+        warn("cfg.ssl_cert: {s}\n", .{cfg.ssl_cert});
         warn("cfg.verbose: {}\n", .{cfg.verbose});
         warn("cfg.rl_decay: {}\n", .{cfg.rl_decay});
         warn("cfg.rl_threshold: {}\n", .{cfg.rl_threshold});
@@ -658,16 +665,16 @@ fn loadcfg() anyerror!Config {
 
 /// loads a blob from cfg.datadir/_path/fname, can enforce that the blob has an expected _size
 /// returned blob is allocated and must be freed by caller
-fn load_blob(balloc: *mem.Allocator, cfg: *const Config, _path: []const u8, fname: []const u8, _size: ?usize) anyerror![]u8 {
+fn load_blob(balloc: mem.Allocator, cfg: *const Config, _path: []const u8, fname: []const u8, _size: ?usize) anyerror![]u8 {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", _path, "/", fname });
     defer allocator.free(path);
-    if (std.os.open(path, std.os.O_RDONLY, 0)) |f| {
+    if (std.os.open(path, std.os.O.RDONLY, 0)) |f| {
         defer std.os.close(f);
         const s = try std.os.fstat(f);
         const fsize = s.size;
         if (_size) |size| {
             if (fsize != size) {
-                if (cfg.verbose) warn("{} has not expected size of {}B instead has {}B\n", .{ path, size, fsize });
+                if (cfg.verbose) warn("{s} has not expected size of {}B instead has {}B\n", .{ path, size, fsize });
                 return LoadBlobError.WrongSize;
             }
         }
@@ -688,7 +695,7 @@ fn load_blob(balloc: *mem.Allocator, cfg: *const Config, _path: []const u8, fnam
 /// caller is responsible to free returned string
 fn tohexid(id: [32]u8) anyerror![]u8 {
     const hexbuf = try allocator.alloc(u8, 64);
-    return std.fmt.bufPrint(hexbuf, "{x:0>64}", .{id});
+    return std.fmt.bufPrint(hexbuf, "{x:0>64}", .{std.fmt.fmtSliceHexLower(id[0..])});
 }
 
 /// verifies an ed25519 signed message using libsodiums crypto_sign_verify_detached
@@ -705,7 +712,7 @@ fn verify_blob(msg: []u8, pk: [32]u8) SphinxError![]u8 {
 fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []const u8) anyerror!void {
     const fpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", path, "/", fname });
     defer allocator.free(fpath);
-    if (std.os.open(fpath, std.os.O_WRONLY | std.os.O_CREAT, 0o600)) |f| {
+    if (std.os.open(fpath, std.os.O.WRONLY | std.os.O.CREAT, 0o600)) |f| {
         defer std.os.close(f);
         const w = try std.os.write(f, blob);
         if (w != blob.len) return SphinxError.Error;
@@ -769,22 +776,22 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
             blob = b;
         } else |err| {
             if (err != error.FileNotFound) {
-                if (cfg.verbose) warn("cannot open {}/{}/blob error: {}\n", .{ cfg.datadir, hexid, err });
+                if (cfg.verbose) warn("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err });
                 fail(s, cfg);
             }
-            warn("user blob authkey fund, but no blob for id: {}\n", .{hexid});
+            warn("user blob authkey fund, but no blob for id: {s}\n", .{hexid});
             fail(s,cfg);
         }
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {}/{}/blob error: {}\n", .{ cfg.datadir, hexid, err });
+            if (cfg.verbose) warn("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err });
             fail(s, cfg);
         }
         // ensure that the blob record directory also doesn't exist
         const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
         defer allocator.free(tdir);
         if (utils.dir_exists(tdir)) {
-            warn("user blob authkey not found, but dir exists: {}\n", .{hexid});
+            warn("user blob authkey not found, but dir exists: {s}\n", .{hexid});
             fail(s,cfg);
         }
 
@@ -858,7 +865,7 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
-    } else |err| {
+    } else |_| {
         fail(s, cfg);
     }
 
@@ -870,7 +877,7 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         s_allocator.free(k);
 
         sodium.randombytes_buf(resp[32..].ptr, resp.len - 32); // nonce to sign
-    } else |err| {
+    } else |_| {
         resp = try allocator.alloc(u8, 32);
         sodium.randombytes_buf(resp[0..].ptr, resp.len); // nonce to sign
     }
@@ -918,7 +925,7 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 
     var buf: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rule, signature
     //# wait for auth signing pubkey and rules
-    const msglen = try s.read(buf[0..buf.len]);
+    const msglen = try read_pkt(s, buf[0..buf.len]);
     if (msglen != buf.len) {
         fail(s, cfg);
     }
@@ -958,7 +965,7 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     //# and now also wants a sphinx rwd
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |k| {
         key = k;
-    } else |err| {
+    } else |_| {
         // todo?
         //key = try s_allocator.alloc(u8, 32);
         // todo should actually be always the same for repeated alphas
@@ -973,7 +980,7 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     //# and now also wants a sphinx rwd
     if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], null)) |r| {
         rules = r;
-    } else |err| {
+    } else |_| {
         bail = true;
     }
 
@@ -1074,14 +1081,14 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     defer allocator.free(new_rulespath);
     if (load_blob(allocator, cfg, req.id[0..], new_rulespath, RULE_SIZE)) |r| {
         new_rules = r;
-    } else |err| {
+    } else |_| {
         fail(s,cfg);
     }
     defer allocator.free(new_rules);
     var cur_rules: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], RULE_SIZE)) |r| {
         cur_rules = r;
-    } else |err| {
+    } else |_| {
         fail(s,cfg);
     }
     defer allocator.free(cur_rules);
@@ -1092,14 +1099,14 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     defer allocator.free(new_pubpath);
     if (load_blob(allocator, cfg, req.id[0..], new_pubpath, 32)) |r| {
         new_pub = r;
-    } else |err| {
+    } else |_| {
         fail(s,cfg);
     }
     defer allocator.free(new_pub);
     var cur_pub: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |r| {
         cur_pub = r;
-    } else |err| {
+    } else |_| {
         fail(s,cfg);
     }
     defer allocator.free(cur_pub);
@@ -1108,13 +1115,13 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     var new_key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], new[0..], 32)) |r| {
         new_key = r;
-    } else |err| {
+    } else |_| {
         fail(s,cfg);
     }
     var cur_key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 32)) |r| {
         cur_key = r;
-    } else |err| {
+    } else |_| {
         s_allocator.free(new_key);
         fail(s,cfg);
     }
@@ -1168,11 +1175,10 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 fn read(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     auth(cfg, s, req) catch fail(s, cfg);
 
-    var blob: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "blob", null)) |r| {
         _ = try s.write(r);
         allocator.free(r);
-    } else |err| {
+    } else |_| {
         _ = try s.write("");
     }
     try s.flush();

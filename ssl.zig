@@ -158,9 +158,9 @@ pub fn Stream(comptime SrcInStream: type, comptime SrcOutStream: type) type {
                 &stream.ioc,
                 stream.engine,
                 sockRead,
-                @ptrCast(*c_void, in_stream),
+                @ptrCast(*anyopaque, in_stream),
                 sockWrite,
-                @ptrCast(*c_void, out_stream),
+                @ptrCast(*anyopaque, out_stream),
             );
             return stream;
         }
@@ -178,20 +178,20 @@ pub fn Stream(comptime SrcInStream: type, comptime SrcOutStream: type) type {
         }
 
         /// low level read from fd to ssl library
-        fn sockRead(ctx: ?*c_void, buf: [*c]u8, len: usize) callconv(.C) c_int {
+        fn sockRead(ctx: ?*anyopaque, buf: [*c]u8, len: usize) callconv(.C) c_int {
             var input = @ptrCast(SrcInStream, @alignCast(@alignOf(std.meta.Child(SrcInStream)), ctx.?));
             return if (input.read(buf[0..len])) |num|
                 if (num > 0) @intCast(c_int, num) else -1
-            else |err|
+            else |_|
                 -1;
         }
 
         /// low level  write from ssl library to fd
-        fn sockWrite(ctx: ?*c_void, buf: [*c]const u8, len: usize) callconv(.C) c_int {
+        fn sockWrite(ctx: ?*anyopaque, buf: [*c]const u8, len: usize) callconv(.C) c_int {
             var output = @ptrCast(SrcOutStream, @alignCast(@alignOf(std.meta.Child(SrcOutStream)), ctx.?));
             return if (output.write(buf[0..len])) |num|
                 if (num > 0) @intCast(c_int, num) else -1
-            else |err|
+            else |_|
                 -1;
         }
 
