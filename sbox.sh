@@ -19,13 +19,14 @@ bwrap --unshare-all \
       --share-net \
       --hostname zphinx \
       --ro-bind "$1" /oracle \
-      --file 12 /sphinx.cfg \
+      --file 0 /sphinx.cfg \
       --bind "$datadir" /data \
       --ro-bind "$ssl_cert" /cert.pem \
       --ro-bind "$ssl_key" /key.pem \
       $mkdirs $libinds \
       --seccomp 11 11<$3 \
-      /oracle 12<<EOCFG
+      --chdir / \
+      /oracle <<EOCFG
 [server]
 ssl_key="key.pem"
 ssl_cert="cert.pem"
