@@ -6,4 +6,4 @@
 	url = https://www.bearssl.org/git/BearSSL
 [submodule "zig-toml"]
 	path = zig-toml
-	url = https://github.com/aeronavery/zig-toml/
+	url = git@github.com:stef/zig-toml.git
