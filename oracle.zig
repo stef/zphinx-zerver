@@ -555,12 +555,12 @@ fn fail(s: anytype, cfg: *const Config) noreturn {
     if (cfg.verbose) {
         std.debug.dumpCurrentStackTrace(@frameAddress());
         warn("fail\n", .{});
-        std.debug.dumpCurrentStackTrace(null);
+        std.debug.dumpCurrentStackTrace(@returnAddress());
     }
-    _ = s.write("\x00\x04fail") catch unreachable;
-    s.flush() catch unreachable;
+    _ = s.write("\x00\x04fail") catch null;
+    _ = s.flush() catch null;
     _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
-    s.close() catch unreachable;
+    _ = s.close() catch null;
     os.exit(0);
 }
 
