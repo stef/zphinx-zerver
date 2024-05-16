@@ -1,10 +1,12 @@
 # Zphinx Zerver!
 
-This is an experimental sphinx server. for more info see:
+This is an implementation of a sphinx server that you should run in production.
+
+for more info see:
 https://github.com/stef/libsphinx and for a reference implementation see:
-https://github.com/stef/pwdsphinx/blob/v2-bcrypto/pwdsphinx/oracle.py
+https://github.com/stef/pwdsphinx/blob/main/pwdsphinx/oracle.py
 for testing use the cli client `sphinx.py` from
-https://github.com/stef/pwdsphinx/blob/v2-bcrypto/pwdsphinx/sphinx.py
+https://github.com/stef/pwdsphinx/blob/main/pwdsphinx/sphinx.py
 
 Licensed under AGPLv3+
 
@@ -26,7 +28,8 @@ On a musl-based system just run `zig build -Drelease-safe=true` and be happy.
 
 On a production debian system this should work: `zig build install --prefix . -Drelease-safe=true -Dtarget=x86_64-linux-gnu.2.25`
 
-You might want to give permission to bind to ports below 1024:
+You might want to give permission to bind to ports below 1024 (if you run this
+as recommended on port 433):
 ```
 sudo setcap 'cap_net_bind_service=+ep' ./bin/oracle
 ```
@@ -60,4 +63,14 @@ logger run oracle like this:
 ```
 ./bin/oracle 2>&1 | /usr/bin/ts
 ```
+
+## Funding
+
+This project is funded through [NGI0 PET](https://nlnet.nl/PET), a fund
+established by [NLnet](https://nlnet.nl) with financial support from the
+European Commission's [Next Generation Internet](https://ngi.eu) program. Learn
+more at the [NLnet project page](https://nlnet.nl/project/OpaqueSphinxServer).
+
+[<img src="https://nlnet.nl/logo/banner.png" alt="NLnet foundation logo" width="20%" />](https://nlnet.nl)
+[<img src="https://nlnet.nl/image/logos/NGI0_tag.svg" alt="NGI Zero Logo" width="20%" />](https://nlnet.nl/PET)
 
