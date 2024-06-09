@@ -1,29 +1,31 @@
-const Builder = @import("std").build.Builder;
+const Builder = @import("std").Build;
 
 pub fn build(b: *Builder) void {
-    const mode = b.standardReleaseOptions();
     const target = b.standardTargetOptions(.{});
-    const exe = b.addExecutable("oracle", "oracle.zig");
-    exe.setBuildMode(mode);
+    const optimize = b.standardOptimizeOption(.{});
 
-    exe.addIncludeDir(".");
-    exe.addSystemIncludeDir("/usr/include");
-    exe.addLibPath("/usr/lib");
+    const exe = b.addExecutable(.{
+        .name = "oracle",
+        .root_source_file = .{ .path = "oracle.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
 
-    exe.linkLibC();
+    exe.addIncludePath(b.path("."));
+
     exe.linkSystemLibrary("sodium");
     exe.linkSystemLibrary("equihash");
 
-    const bear = b.addStaticLibrary("bear", null);
-    linkBearSSL(".", bear, target);
-    exe.addIncludeDir("./BearSSL/inc");
-    exe.addIncludeDir("./BearSSL/src");
-    exe.addIncludeDir("./BearSSL/tools");
+    const bear = b.addStaticLibrary(.{ .name = "bear", .target = target, .optimize = optimize });
+    linkBearSSL(".", bear, target, b);
+    exe.addIncludePath(b.path("./BearSSL/inc"));
+    exe.addIncludePath(b.path("./BearSSL/src"));
+    exe.addIncludePath(b.path("./BearSSL/tools"));
     exe.linkLibrary(bear);
 
-    linklibsphinx(".", exe, target);
+    linklibsphinx(".", exe, b);
 
-    const run_cmd = exe.run();
+    const run_cmd = b.addRunArtifact(exe);
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
@@ -34,38 +36,34 @@ pub fn build(b: *Builder) void {
 
 const std = @import("std");
 
-fn linklibsphinx(comptime path_prefix: []const u8, module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) void {
-    module.linkLibC();
-    module.setTarget(target);
+fn linklibsphinx(comptime path_prefix: []const u8, module: *std.Build.Step.Compile, b: *Builder) void {
+    module.addIncludePath(b.path(path_prefix ++ "/sphinx/src"));
 
-    module.addIncludeDir(path_prefix ++ "/sphinx/src");
-
-    module.addCSourceFile(path_prefix ++ "/sphinx/src/sphinx.c", &[_][]const u8{
-        "-Wall",
-    });
-    module.addCSourceFile(path_prefix ++ "/sphinx/src/common.c", &[_][]const u8{
-        "-Wall",
-    });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/sphinx/src/sphinx.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/sphinx/src/common.c"), .flags = &[_][]const u8{"-Wall"} });
 }
 
 /// Adds all BearSSL sources to the exeobj step
 /// Allows simple linking from build scripts.
-fn linkBearSSL(comptime path_prefix: []const u8, module: *std.build.LibExeObjStep, target: std.zig.CrossTarget) void {
+fn linkBearSSL(comptime path_prefix: []const u8, module: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, b: *Builder) void {
     module.linkLibC();
-    module.setTarget(target);
+    //module.setTarget(target);
 
-    module.addIncludeDir(path_prefix ++ "/BearSSL/inc");
-    module.addIncludeDir(path_prefix ++ "/BearSSL/src");
-    module.addIncludeDir(path_prefix ++ "/BearSSL/tools");
+    module.addIncludePath(b.path(path_prefix ++ "/BearSSL/inc"));
+    module.addIncludePath(b.path(path_prefix ++ "/BearSSL/src"));
+    module.addIncludePath(b.path(path_prefix ++ "/BearSSL/tools"));
 
     inline for (bearssl_sources) |srcfile| {
-        module.addCSourceFile(path_prefix ++ srcfile, &[_][]const u8{
-            "-Wall",
-            "-DBR_LE_UNALIGNED=0", // this prevent BearSSL from using undefined behaviour when doing potential unaligned access
+        module.addCSourceFile(.{
+            .file = b.path(path_prefix ++ srcfile),
+            .flags = &[_][]const u8{
+                "-Wall",
+                "-DBR_LE_UNALIGNED=0", // this prevent BearSSL from using undefined behaviour when doing potential unaligned access
+            },
         });
     }
 
-    if (target.isWindows()) {
+    if (target.result.os.tag == std.Target.Os.Tag.windows) {
         module.linkSystemLibrary("advapi32");
     }
 }

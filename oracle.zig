@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const net = std.net;
 const os = std.os;
+const posix = std.posix;
 const fs = std.fs;
 const mem = std.mem;
 const BufSet = std.BufSet;
@@ -10,6 +11,7 @@ const toml = @import("zig-toml/src/toml.zig");
 const ssl = @import("ssl.zig");
 const utils = @import("utils.zig");
 const secret_allocator = @import("secret_allocator.zig");
+
 pub const sodium = @cImport({
     @cInclude("sodium.h");
 });
@@ -107,25 +109,25 @@ const ReqType = enum(u8) {
 /// initial request sent from client
 const Request = struct {
     /// see enum above
-    op: ReqType,   
+    op: ReqType align(1),
     /// id is the hex string representation of the original [32]u8 id sent by the client
-    id: [64]u8,
-    has_alpha: bool = true,
+    id: [64]u8 align(1),
+    has_alpha: bool align(1) = true,
     /// the blinded password sent by the client.
-    alpha: [32]u8,
+    alpha: [32]u8 align(1),
 };
 
-const ChallengeRequest = packed struct {
-    n: u8,
-    k: u8,
-    ts: i64,
-    sig: [32]u8,
+const ChallengeRequest = extern struct {
+    n: u8 align(1),
+    k: u8 align(1),
+    ts: i64 align(1) ,
+    sig: [32]u8 align(1),
 };
 
-const RatelimitCTX = packed struct {
-    level: u8,
-    count: u32,
-    ts: i64,
+const RatelimitCTX = extern struct {
+    level: u8 align(1),
+    count: u32 align(1),
+    ts: i64 align(1),
 };
 
 const SphinxError = error{Error};
@@ -140,40 +142,22 @@ const LoadCfgError = error{
 };
 
 
-var conn: net.StreamServer.Connection = undefined;
-
-/// workaround for std.net.StreamServer.accept not being able to handle SO_*TIMEO
-fn accept(self: *net.StreamServer) !net.StreamServer.Connection {
-    var accepted_addr: net.Address = undefined;
-    var adr_len: os.socklen_t = @sizeOf(net.Address);
-    if (os.accept(self.sockfd.?, &accepted_addr.any, &adr_len, os.SOCK.CLOEXEC)) |fd| {
-        return net.StreamServer.Connection{
-            .stream = net.Stream{ .handle = fd },
-            .address = accepted_addr,
-        };
-    } else |err| return err;
-}
+var conn: net.Server.Connection = undefined;
 
 /// classical forking server with tcp connection wrapped by bear ssl
 /// number of childs is configurable, as is the listening IP address and port
 pub fn main() anyerror!void {
     const cfg = try loadcfg();
-    const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast([*c]const u8, cfg.ssl_key));
+    const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast(cfg.ssl_key));
     var certs_len: usize = undefined;
-    const certs: *ssl.c.br_x509_certificate = ssl.c.read_certificates(@ptrCast([*c]const u8, cfg.ssl_cert), &certs_len);
+    const certs: *ssl.c.br_x509_certificate = ssl.c.read_certificates(@ptrCast(cfg.ssl_cert), &certs_len);
 
-    var opt = net.StreamServer.Options{
-        .kernel_backlog = 128,
-        .reuse_address = true,
-    };
+    const addr = try net.Address.parseIp(cfg.address, cfg.port);
 
-    var srv = net.StreamServer.init(opt);
-    var addr = try net.Address.parseIp(cfg.address, cfg.port);
-
-    srv.listen(addr) catch |err| switch (err) {
+    var srv = addr.listen(.{.reuse_address = true }) catch |err| switch (err) {
         error.AddressInUse => {
             warn("port {} already in use.", .{cfg.port});
-            os.exit(1);
+            posix.exit(1);
         },
         else => {
            return err;
@@ -181,23 +165,23 @@ pub fn main() anyerror!void {
         }
     };
 
-    const to = os.timeval{
+    const to = posix.timeval{
         .tv_sec = cfg.timeout,
         .tv_usec = 0
     };
-    try os.setsockopt(srv.sockfd.?, os.SOL.SOCKET, os.SO.SNDTIMEO, mem.asBytes(&to));
-    try os.setsockopt(srv.sockfd.?, os.SOL.SOCKET, os.SO.RCVTIMEO, mem.asBytes(&to));
+    try posix.setsockopt(srv.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, mem.asBytes(&to));
+    try posix.setsockopt(srv.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, mem.asBytes(&to));
 
     var kids = BufSet.init(allocator);
 
     while (true) {
-        if(accept(&srv)) |c| {
+        if(srv.accept()) |c| {
             conn = c;
         } else |e| {
             if(e==error.WouldBlock) {
                 const Status = if (builtin.link_libc) c_int else u32;
                 var status: Status = undefined;
-                const rc = os.system.waitpid(-1, &status, os.system.W.NOHANG);
+                const rc = posix.system.waitpid(-1, &status, posix.system.W.NOHANG);
                 if(rc>0) {
                     kids.remove(mem.asBytes(&rc));
                     if(cfg.verbose) warn("removing kid {} from pool\n",.{rc});
@@ -209,12 +193,12 @@ pub fn main() anyerror!void {
 
         while (kids.count() >= cfg.max_kids) {
             if (cfg.verbose) warn("waiting for kid to die\n", .{});
-            const pid = std.os.waitpid(-1, 0).pid;
+            const pid = posix.waitpid(-1, 0).pid;
             if (cfg.verbose) warn("wait returned: {}\n", .{pid});
             kids.remove(mem.asBytes(&pid));
         }
 
-        var pid = try os.fork();
+        var pid = try posix.fork();
         switch (pid) {
             0 => {
                 var sc: ssl.c.br_ssl_server_context = undefined;
@@ -236,7 +220,7 @@ pub fn main() anyerror!void {
                         return err;
                     }
                 };
-                os.exit(0);
+                posix.exit(0);
 
             },
             else => {
@@ -250,7 +234,7 @@ pub fn main() anyerror!void {
 /// parse incoming requests into a Request structure
 /// most importantly convert raw id into hex id
 fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
-    if(@intToEnum(ReqType, msg[0]) == ReqType.READ and msg.len == 33) {
+    if(@as(ReqType, @enumFromInt(msg[0])) == ReqType.READ and msg.len == 33) {
         var req = allocator.create(Request) catch fail(s, cfg);
         req.op = ReqType.READ;
         req.has_alpha = false;
@@ -260,14 +244,14 @@ fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
 
     if (msg.len != 65) fail(s, cfg);
 
-    const RawRequest = packed struct {
-        op: ReqType, id: [32]u8, alpha: [32]u8
+    const RawRequest = extern struct {
+        op: ReqType align(1), id: [32]u8 align(1), alpha: [32]u8 align(1)
     };
-    const rreq: *RawRequest = @ptrCast(*RawRequest, msg[0..65]);
+    const rreq: *RawRequest = @ptrCast(msg[0..65]);
 
     var req = allocator.create(Request) catch fail(s, cfg);
     req.op = rreq.op;
-    mem.copy(u8, req.alpha[0..], rreq.alpha[0..]);
+    @memcpy(req.alpha[0..], rreq.alpha[0..]);
     _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{std.fmt.fmtSliceHexLower(rreq.id[0..])}) catch fail(s, cfg);
     return req;
 }
@@ -279,21 +263,21 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
         if(err==ssl.BearError.UNSUPPORTED_VERSION) {
            warn("{} unsupported TLS version. aborting.\n",.{conn.address});
            try s.close();
-           os.exit(0);
+           posix.exit(0);
         } else if(err==ssl.BearError.UNKNOWN_ERROR_582 or err==ssl.BearError.UNKNOWN_ERROR_552) {
            warn("{} unknown TLS error: {}. aborting.\n",.{conn.address, err});
            try s.close();
-           os.exit(0);
+           posix.exit(0);
         } else if(err==ssl.BearError.BAD_VERSION) {
            warn("{} bad TLS version. aborting.\n",.{conn.address});
            try s.close();
-           os.exit(0);
+           posix.exit(0);
         }
     };
 
     //if (cfg.verbose) warn("rl op {x}\n", .{op[0]});
 
-    switch (@intToEnum(ChallengeOp, op[0])) {
+    switch (@as(ChallengeOp, @enumFromInt(op[0]))) {
         ChallengeOp.SPHINX_CREATE => {
             var req = [_]u8{0} ** 65;
             const reqlen = try s.read(req[1..]);
@@ -317,7 +301,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
         }
     }
     try s.close();
-    os.exit(0);
+    posix.exit(0);
 }
 
 fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
@@ -327,9 +311,9 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     var reqlen : usize = 0;
     _ = try s.read(req[0..1]);
 
-    warn("create_challenge for req op {x} ", .{@intToEnum(ReqType, req[0])});
+    warn("create_challenge for req op {x} ", .{req[0]});
 
-    if(@intToEnum(ReqType, req[0])==ReqType.READ) {
+    if(@as(ReqType, @enumFromInt(req[0]))==ReqType.READ) {
         _ = try s.read(req[1..33]);
         reqlen = 33;
         //if (cfg.verbose) warn("cc: {x:0>66} ", .{req[0..33]});
@@ -363,7 +347,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     if(cfg.verbose) warn("id: {s}\n", .{request.id[0..]});
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
-        var ctx: *RatelimitCTX = @ptrCast(*RatelimitCTX, diff[0..]);
+        var ctx: *RatelimitCTX = @ptrCast(@alignCast(diff[0..]));
         //if (cfg.verbose) warn("rl ctx {}\n", .{ctx});
         if(ctx.level >= Difficulties.len) {
             // invalid rl context, punish hard
@@ -373,7 +357,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         } else if(now - cfg.rl_decay > ctx.ts and ctx.level>0) { // timestamp too long ago, let's decay
             const periods = @divTrunc((now - ctx.ts), cfg.rl_decay);
             if(ctx.level >= periods) {
-                ctx.level = ctx.level - @intCast(u8, periods);
+                ctx.level = ctx.level - @as(u8, @intCast(periods));
             } else {
                 ctx.level = 0;
             }
@@ -438,17 +422,17 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     warn("verify puzzle start\n", .{});
     // first read challenge record
     var challenge : ChallengeRequest = undefined;
-    var challenge_bytes = mem.asBytes(&challenge)[0..];
+    const challenge_bytes = mem.asBytes(&challenge)[0..];
     const challenge_len = try s.read(challenge_bytes);
     if(challenge_len!=challenge_bytes.len) {
-        warn("challenge record to short\n", .{});
+        warn("challenge record to short {} != {}\n", .{challenge_len, challenge_bytes.len});
         fail(s,cfg);
     }
     // also read original request
     var req = [_]u8{0} ** 65;
     var reqlen : usize = 0;
     _ = try s.read(req[0..1]);
-    if(@intToEnum(ReqType, req[0])==ReqType.READ) {
+    if(@as(ReqType, @enumFromInt(req[0]))==ReqType.READ) {
         _ = try s.read(req[1..33]);
         reqlen = 33;
     } else {
@@ -468,7 +452,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     const tosign = mem.asBytes(&challenge)[0..@offsetOf(ChallengeRequest, "sig")];
     // todo check freshness of timestamp!
 
-    var sig = [_]u8{0} ** challenge.sig.len;
+    var sig = [_]u8{0} ** 32; // challenge.sig.len == 32
     var state : sodium.crypto_generichash_state = undefined;
     _ = sodium.crypto_generichash_init(&state, key.ptr, 32, 32);
     _ = sodium.crypto_generichash_update(&state, @as([*c]u8, &req), reqlen);
@@ -485,7 +469,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     for(Difficulties) |diff| {
         if(diff.n==challenge.n and
                diff.k==challenge.k and
-               (now - @intCast(i32, diff.timeout+cfg.rl_gracetime)) < challenge.ts) {
+               (now - @as(i32, @intCast(diff.timeout+cfg.rl_gracetime))) < challenge.ts) {
             expired = false;
             break;
         }
@@ -497,7 +481,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
 
     // valid challenge record, let's read the solution
     const solsize = equihash.solsize(challenge.n, challenge.k);
-    var solution: []u8 = try allocator.alloc(u8, @intCast(usize, solsize));
+    var solution: []u8 = try allocator.alloc(u8, @as(usize, @intCast(solsize)));
     defer allocator.free(solution);
     const sollen = try s.read(solution[0..]);
     if(sollen!=solsize) {
@@ -505,8 +489,8 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         fail(s,cfg);
     }
     var seed: []u8 = try allocator.alloc(u8, challenge_len + reqlen);
-    mem.copy(u8, seed[0..challenge_len], challenge_bytes);
-    mem.copy(u8, seed[challenge_len..challenge_len+reqlen], req[0..reqlen]);
+    @memcpy(seed[0..challenge_len], challenge_bytes);
+    @memcpy(seed[challenge_len..challenge_len+reqlen], req[0..reqlen]);
     if(0==equihash.verify(challenge.n, challenge.k, seed.ptr, seed.len, solution.ptr, solsize)) {
         warn("bad challenge solution\n",.{});
         fail(s,cfg);
@@ -545,7 +529,7 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
     }
     try s.close();
     allocator.destroy(req);
-    os.exit(0);
+    posix.exit(0);
 }
 
 /// whenever anything fails during the execution of the protocol the server sends
@@ -561,12 +545,12 @@ fn fail(s: anytype, cfg: *const Config) noreturn {
     _ = s.flush() catch null;
     _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
     _ = s.close() catch null;
-    os.exit(0);
+    posix.exit(0);
 }
 
 fn expandpath(path: []const u8) [:0]u8 {
     var w: wordexp.wordexp_t=undefined;
-    const s = std.cstr.addNullByte(allocator, path) catch unreachable;
+    const s = allocator.dupeZ(u8, path) catch unreachable;
     defer allocator.free(s);
     const r = wordexp.wordexp(s,&w, wordexp.WRDE_NOCMD|wordexp.WRDE_UNDEF);
     if(r!=0) {
@@ -576,10 +560,10 @@ fn expandpath(path: []const u8) [:0]u8 {
     defer wordexp.wordfree(&w);
     if(w.we_wordc!=1) {
         warn("wordexp({s}) not one word: {}\n", .{ s, w.we_wordc });
-        os.exit(1);
+        posix.exit(1);
     }
     const word = std.mem.sliceTo(@as([*c]u8, w.we_wordv[0]),0);
-    var cpy = allocator.dupeZ(u8, word) catch unreachable;
+    const cpy = allocator.dupeZ(u8, word) catch unreachable;
     return cpy;
 }
 
@@ -591,10 +575,8 @@ fn expandpath(path: []const u8) [:0]u8 {
 /// and in this process updated the values of the default Config structure
 fn loadcfg() anyerror!Config {
     @setCold(true);
-    var parser: toml.Parser = undefined;
-    defer parser.deinit();
 
-    const home = std.os.getenv("HOME") orelse "/nonexistant";
+    const home = posix.getenv("HOME") orelse "/nonexistant";
     const cfg1 = mem.concat(allocator, u8, &[_][]const u8{ home, "/.config/sphinx/config" }) catch unreachable;
     defer allocator.free(cfg1);
     const cfg2 = mem.concat(allocator, u8, &[_][]const u8{ home, "/.sphinxrc" }) catch unreachable;
@@ -622,27 +604,36 @@ fn loadcfg() anyerror!Config {
         .rl_gracetime = 10,
     };
 
+    //var parser: toml.Parser = undefined;
     for (paths) |filename| {
-        var t = toml.parseFile(allocator, filename, &parser);
-        if (t) |table| {
-            defer table.deinit();
+        if(toml.parseFile(allocator, filename)) |p| {
+            var parser: toml.Parser = p;
+            defer parser.deinit();
+            const t = parser.parse();
+            if (t) |table| {
+                defer table.deinit();
 
-            if (table.keys.get("server")) |server| {
-                cfg.verbose = if (server.Table.keys.get("verbose")) |v| v.Boolean else cfg.verbose;
-                cfg.address = if (server.Table.keys.get("address")) |v| try allocator.dupe(u8, v.String) else cfg.address;
-                cfg.port = if (server.Table.keys.get("port")) |v| @intCast(u16, v.Integer) else cfg.port;
-                cfg.timeout = if (server.Table.keys.get("timeout")) |v| @intCast(u16, v.Integer) else cfg.timeout;
-                cfg.datadir = if (server.Table.keys.get("datadir")) |v| expandpath(v.String) else cfg.datadir;
-                cfg.max_kids = if (server.Table.keys.get("max_kids")) |v| @intCast(u16, v.Integer) else cfg.max_kids;
-                cfg.ssl_key = if (server.Table.keys.get("ssl_key")) |v| expandpath(v.String) else cfg.ssl_key;
-                cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| expandpath(v.String) else cfg.ssl_cert;
-                cfg.rl_decay = if (server.Table.keys.get("rl_decay")) |v| @intCast(i64, v.Integer) else cfg.rl_decay;
-                cfg.rl_threshold = if (server.Table.keys.get("rl_threshold")) |v| @intCast(u8, v.Integer) else cfg.rl_threshold;
-                cfg.rl_gracetime = if (server.Table.keys.get("rl_gracetime")) |v| @intCast(u16, v.Integer) else cfg.rl_gracetime;
+                if (table.keys.get("server")) |server| {
+                    cfg.verbose = if (server.Table.keys.get("verbose")) |v| v.Boolean else cfg.verbose;
+                    cfg.address = if (server.Table.keys.get("address")) |v| try allocator.dupe(u8, v.String) else cfg.address;
+                    cfg.port = if (server.Table.keys.get("port")) |v| @intCast(v.Integer) else cfg.port;
+                    cfg.timeout = if (server.Table.keys.get("timeout")) |v| @intCast(v.Integer) else cfg.timeout;
+                    cfg.datadir = if (server.Table.keys.get("datadir")) |v| expandpath(v.String) else cfg.datadir;
+                    cfg.max_kids = if (server.Table.keys.get("max_kids")) |v| @intCast(v.Integer) else cfg.max_kids;
+                    cfg.ssl_key = if (server.Table.keys.get("ssl_key")) |v| expandpath(v.String) else cfg.ssl_key;
+                    cfg.ssl_cert = if (server.Table.keys.get("ssl_cert")) |v| expandpath(v.String) else cfg.ssl_cert;
+                    cfg.rl_decay = if (server.Table.keys.get("rl_decay")) |v| @intCast(v.Integer) else cfg.rl_decay;
+                    cfg.rl_threshold = if (server.Table.keys.get("rl_threshold")) |v| @intCast(v.Integer) else cfg.rl_threshold;
+                    cfg.rl_gracetime = if (server.Table.keys.get("rl_gracetime")) |v| @intCast(v.Integer) else cfg.rl_gracetime;
+                }
+            } else |err| {
+                if (err == error.FileNotFound) continue;
+                warn("error loading config {s}: {}\n", .{ filename, err });
             }
         } else |err| {
             if (err == error.FileNotFound) continue;
             warn("error loading config {s}: {}\n", .{ filename, err });
+            return err;
         }
     }
     if(cfg.rl_decay<1) {
@@ -668,9 +659,9 @@ fn loadcfg() anyerror!Config {
 fn load_blob(balloc: mem.Allocator, cfg: *const Config, _path: []const u8, fname: []const u8, _size: ?usize) anyerror![]u8 {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", _path, "/", fname });
     defer allocator.free(path);
-    if (std.os.open(path, std.os.O.RDONLY, 0)) |f| {
-        defer std.os.close(f);
-        const s = try std.os.fstat(f);
+    if (posix.open(path, .{.ACCMODE = .RDONLY }, 0)) |f| {
+        defer posix.close(f);
+        const s = try posix.fstat(f);
         const fsize = s.size;
         if (_size) |size| {
             if (fsize != size) {
@@ -679,8 +670,8 @@ fn load_blob(balloc: mem.Allocator, cfg: *const Config, _path: []const u8, fname
             }
         }
 
-        var buf: []u8 = try balloc.alloc(u8, @intCast(usize, fsize));
-        const rs = try std.os.read(f, buf);
+        const buf: []u8 = try balloc.alloc(u8, @intCast(fsize));
+        const rs = try posix.read(f, buf);
         if (rs != fsize) {
             balloc.free(buf);
             return LoadBlobError.WrongRead;
@@ -712,9 +703,9 @@ fn verify_blob(msg: []u8, pk: [32]u8) SphinxError![]u8 {
 fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []const u8) anyerror!void {
     const fpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", path, "/", fname });
     defer allocator.free(fpath);
-    if (std.os.open(fpath, std.os.O.WRONLY | std.os.O.CREAT, 0o600)) |f| {
-        defer std.os.close(f);
-        const w = try std.os.write(f, blob);
+    if (posix.open(fpath, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o600)) |f| {
+        defer posix.close(f);
+        const w = try posix.write(f, blob);
         if (w != blob.len) return SphinxError.Error;
     } else |err| {
         warn("saveblob: {}\n", .{err});
@@ -725,7 +716,7 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
 fn read_pkt(s: anytype, buf: []u8) anyerror!usize {
     var i: usize = 0;
     while(i<buf.len) {
-        var r = try s.read(buf[i..]);
+        const r = try s.read(buf[i..]);
         i+=r;
     }
     return i;
@@ -734,7 +725,7 @@ fn read_pkt(s: anytype, buf: []u8) anyerror!usize {
 fn write_pkt(s: anytype, buf: []const u8) anyerror!usize {
     var i: usize = 0;
     while(i<buf.len) {
-        var r = try s.write(buf[i..]);
+        const r = try s.write(buf[i..]);
         i+=r;
     }
     return i;
@@ -796,7 +787,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         }
 
         blob = try allocator.alloc(u8, 2);
-        std.mem.set(u8, blob, 0);
+        @memset(blob, 0);
         new = true;
         // fake pubkey
         //pk = try allocator.alloc(u8, 32);
@@ -818,7 +809,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         // read blob size
         const x = try s.read(buf[32..34]);
         if (x != 2) fail(s, cfg);
-        const bloblen = std.mem.readIntBig(u16, buf[32..34]);
+        const bloblen = std.mem.readInt(u16, buf[32..34], std.builtin.Endian.big);
         // read blob
         const end = 34 + @as(u17,bloblen) + 64;
         const recvd = read_pkt(s, buf[34..end]) catch fail(s,cfg);
@@ -827,14 +818,14 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         const tmp = verify_blob(msg, pk) catch fail(s, cfg);
         const new_blob = tmp[32 .. end - 64];
         if (!utils.dir_exists(cfg.datadir)) {
-            std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
+            posix.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
         }
 
         const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
         defer allocator.free(tdir);
 
         if (!utils.dir_exists(tdir)) {
-            std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
+            posix.mkdir(tdir, 0o700) catch fail(s, cfg);
         }
         save_blob(cfg, hexid[0..], "pub", pk[0..]) catch fail(s, cfg);
         save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
@@ -844,7 +835,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         // read blob size
         const x = try s.read(buf[0..2]);
         if (x != 2) fail(s, cfg);
-        const bloblen = std.mem.readIntBig(u16, buf[0..2]);
+        const bloblen = std.mem.readInt(u16, buf[0..2], std.builtin.Endian.big);
         const end = 2 + @as(u17,bloblen) + 64;
         // read blob
         const recvd = read_pkt(s, buf[2..end]) catch fail(s,cfg);
@@ -912,7 +903,7 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     defer allocator.free(tdir);
     if (utils.dir_exists(tdir)) fail(s,cfg);
 
-    var key: []u8 = try s_allocator.alloc(u8, 32);
+    const key: []u8 = try s_allocator.alloc(u8, 32);
     defer s_allocator.free(key);
     sodium.randombytes_buf(key.ptr, key.len);
 
@@ -930,10 +921,10 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         fail(s, cfg);
     }
 
-    const CreateResp = packed struct {
-        pk: [32]u8, rule: [RULE_SIZE]u8, signature: [64]u8
+    const CreateResp = extern struct {
+        pk: [32]u8 align(1), rule: [RULE_SIZE]u8 align(1), signature: [64]u8 align(1)
     };
-    const resp: *CreateResp = @ptrCast(*CreateResp, buf[0..]);
+    const resp: *CreateResp = @ptrCast(buf[0..]);
 
     const blob = verify_blob(buf[0..], resp.pk) catch fail(s, cfg);
     const rules = blob[32..];
@@ -943,9 +934,9 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     update_blob(cfg, s) catch fail(s, cfg);
 
     if (!utils.dir_exists(cfg.datadir)) {
-        std.os.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
+        posix.mkdir(cfg.datadir, 0o700) catch fail(s, cfg);
     }
-    std.os.mkdir(tdir, 0o700) catch fail(s, cfg);
+    posix.mkdir(tdir, 0o700) catch fail(s, cfg);
 
     save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s, cfg);
     save_blob(cfg, req.id[0..], "key", key) catch fail(s, cfg);
@@ -995,8 +986,8 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     var resp = try allocator.alloc(u8, beta.len + rules.len);
     defer allocator.free(resp);
 
-    mem.copy(u8, resp[0..beta.len], beta[0..]);
-    mem.copy(u8, resp[beta.len..], rules[0..]);
+    @memcpy(resp[0..beta.len], beta[0..]);
+    @memcpy(resp[beta.len..], rules[0..]);
 
     allocator.free(rules);
 
@@ -1155,15 +1146,15 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 
     // delete the previously "new" files
     const nkpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
-    std.os.unlink(nkpath) catch fail(s, cfg);
+    posix.unlink(nkpath) catch fail(s, cfg);
     allocator.free(nkpath);
 
     const nppath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "pub.", new });
-    std.os.unlink(nppath) catch fail(s, cfg);
+    posix.unlink(nppath) catch fail(s, cfg);
     allocator.free(nppath);
 
     const nrpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "rules.", new });
-    std.os.unlink(nrpath) catch fail(s, cfg);
+    posix.unlink(nrpath) catch fail(s, cfg);
     allocator.free(nrpath);
 
     // send ack
