@@ -751,6 +751,10 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
 
     //if(cfg.verbose) warn("ub: {x:0>192}\n", .{signedid});
 
+    const idvec: @Vector(32, u8) = signedid[0..32].*;
+    if(@reduce(std.builtin.ReduceOp.Or, idvec) == 0) return;
+
+
     const hexid = try tohexid(signedid[0..32].*);
     defer allocator.free(hexid);
 
