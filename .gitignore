@@ -2,3 +2,6 @@ zig-cache/
 .zshhistory
 cert.pem
 server.der
+.zig-cache
+zig-out
+.arch

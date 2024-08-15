@@ -6,7 +6,11 @@ pub fn build(b: *Builder) void {
 
     const exe = b.addExecutable(.{
         .name = "oracle",
-        .root_source_file = .{ .path = "oracle.zig" },
+        .root_source_file = .{
+            .src_path = .{
+                .owner = b,
+                .sub_path = "oracle.zig" },
+        },
         .target = target,
         .optimize = optimize,
     });
@@ -23,7 +27,7 @@ pub fn build(b: *Builder) void {
     exe.addIncludePath(b.path("./BearSSL/tools"));
     exe.linkLibrary(bear);
 
-    linklibsphinx(".", exe, b);
+    linkliboprf(".", exe, b);
 
     const run_cmd = b.addRunArtifact(exe);
 
@@ -36,11 +40,22 @@ pub fn build(b: *Builder) void {
 
 const std = @import("std");
 
-fn linklibsphinx(comptime path_prefix: []const u8, module: *std.Build.Step.Compile, b: *Builder) void {
-    module.addIncludePath(b.path(path_prefix ++ "/sphinx/src"));
+fn linkliboprf(comptime path_prefix: []const u8, module: *std.Build.Step.Compile, b: *Builder) void {
+    module.addIncludePath(b.path(path_prefix ++ "/liboprf/src"));
+    module.addIncludePath(b.path(path_prefix ++ "/liboprf/src/noise_xk/include"));
+    module.addIncludePath(b.path(path_prefix ++ "/liboprf/src/noise_xk/include/karmel"));
+    module.addIncludePath(b.path(path_prefix ++ "/liboprf/src/noise_xk/include/karmel/minimal"));
 
-    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/sphinx/src/sphinx.c"), .flags = &[_][]const u8{"-Wall"} });
-    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/sphinx/src/common.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/workaround.c"), .flags = &[_][]const u8{"-Wall"} });
+
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/oprf.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/toprf.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/tp-dkg.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/dkg.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/utils.c"), .flags = &[_][]const u8{"-Wall"} });
+
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/noise_xk/src/Noise_XK.c"), .flags = &[_][]const u8{"-Wall"} });
+    module.addCSourceFile(.{ .file = b.path(path_prefix ++ "/liboprf/src/noise_xk/src/XK.c"), .flags = &[_][]const u8{"-Wall"} });
 }
 
 /// Adds all BearSSL sources to the exeobj step

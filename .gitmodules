@@ -1,9 +1,9 @@
-[submodule "sphinx"]
-	path = sphinx
-	url = https://github.com/stef/libsphinx
 [submodule "BearSSL"]
 	path = BearSSL
 	url = https://www.bearssl.org/git/BearSSL
 [submodule "zig-toml"]
 	path = zig-toml
 	url = https://github.com/stef/zig-toml
+[submodule "liboprf"]
+	path = liboprf
+	url = https://github.com/stef/liboprf/
