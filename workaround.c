@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+// zig cannot align data at 64Byte (or anything beyond 16 bytes really)
+// see https://github.com/ziglang/zig/issues/8452
+
+// thus we have to workaround this by allocating/freeing and accessing
+// the data in c which the zig cc backend (clang) handles correctly.
 TP_DKG_PeerState* new_peerstate(void) {
   return aligned_alloc(64,sizeof(TP_DKG_PeerState));
 }
