@@ -1014,7 +1014,6 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
         }
         const cur_step = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).step;
         const resp_size = tp_dkg.tpdkg_peer_output_size(@ptrCast(peer));
-        warn("resp size: {}\n", .{resp_size});
         const resp : []u8 = try allocator.alloc(u8, resp_size);
         defer allocator.free(resp);
         const ret = tp_dkg.tpdkg_peer_next(@ptrCast(peer), msg.ptr, msg.len, resp.ptr, resp.len);
