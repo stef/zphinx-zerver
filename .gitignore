@@ -1,1 +1,9 @@
 sphinx.err
+.arch
+.zig-cache
+.*.swp
+.zshhistory
+log
+*.pem
+*.der
+zig-out
