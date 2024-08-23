@@ -1206,14 +1206,16 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
          fail(s, cfg);
     }
 
-
-    var key = [_]u8{0} ** 32;
-    if(0!=sodium.sodium_mlock(&key,32)) fail(s,cfg);
-    sodium.randombytes_buf(&key, 32);
+    var key = [_]u8{0} ** 33;
+    if(0!=sodium.sodium_mlock(&key,key.len)) fail(s,cfg);
+    sodium.randombytes_buf(key[1..].ptr, 32);
+    key[0]=1;
 
     //var beta: [32]u8 = undefined;
-    var beta = [_]u8{0} ** 32;
-    if (-1 == oprf.oprf_Evaluate(&key, &alpha, &beta)) fail(s, cfg);
+    var beta = [_]u8{0} ** 33;
+    beta[0]=key[0];
+
+    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &alpha, &beta)) fail(s, cfg);
 
     const betalen = try s.write(beta[0..]);
     try s.flush();
