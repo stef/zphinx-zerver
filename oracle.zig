@@ -37,13 +37,14 @@ pub const wordexp = @cImport({
 });
 
 /// The size of an encrypted pwd gen rule
-///    6 - the size of the rule itself
-///   24 - the nonce for encryption
-///   32 - the xor_mask
-///   16 - the auth tag
+///    6    - the size of the rule itself
+///   24    - the nonce for encryption
+///   32/64 - the xor_mask for v1/v2 rules
+///   16    - the auth tag
 ///------
 /// + 78
-const RULE_SIZE = 79;
+const V1RULE_SIZE = 79;
+const RULE_SIZE = V1RULE_SIZE + 32;
 
 /// normal non-sensitive allocator
 const allocator = std.heap.c_allocator;
@@ -117,6 +118,7 @@ const ReqType = enum(u8) {
     READ = 0x33,                // 0011 0011
     UNDO = 0x55,                // 0101 0101
     GET = 0x66,                 // 0110 0110
+    V1GET = 0x69,               // 0110 1001
     COMMIT = 0x99,              // 1001 1001
     CHANGE_DKG = 0xa0,
     CHANGE = 0xaa,              // 1010 1010
@@ -158,7 +160,6 @@ const LoadBlobError = error{
 const LoadCfgError = error{
     InvalidRLDecay,
 };
-
 
 var conn: net.Server.Connection = undefined;
 
@@ -541,7 +542,10 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
             try create_dkg(cfg, s, req);
         },
         ReqType.GET => {
-            try get(cfg, s, req);
+            try get(cfg, s, req, false);
+        },
+        ReqType.V1GET => {
+            try get(cfg, s, req, true);
         },
         ReqType.CHANGE => {
             try change(cfg, s, req);
@@ -600,6 +604,14 @@ fn expandpath(path: []const u8) [:0]u8 {
     const word = std.mem.sliceTo(@as([*c]u8, w.we_wordv[0]),0);
     const cpy = allocator.dupeZ(u8, word) catch unreachable;
     return cpy;
+}
+
+fn ssl_file_missing(path: []const u8) noreturn {
+    warn("The SSL key at {s} is not a readable file. Make sure this is a proper ssl key.\n", .{path});
+    warn("Our GettingStarted document gives simple example of how to do so.\n", .{});
+    warn("Check out https://sphinx.pm/server_install.html .\n", .{});
+    warn("Aborting.\n", .{});
+    posix.exit(1);
 }
 
 /// tries to load the config from
@@ -679,6 +691,68 @@ fn loadcfg() anyerror!Config {
         warn("rl_decay must be positive number, please check your config.\n",.{});
         return LoadCfgError.InvalidRLDecay;
     }
+
+    std.fs.cwd().access(cfg.ssl_key, .{}) catch {
+        ssl_file_missing(cfg.ssl_key);
+    };
+    std.fs.cwd().access(cfg.ssl_cert, .{}) catch {
+        ssl_file_missing(cfg.ssl_cert);
+    };
+    std.fs.cwd().access(cfg.ltsigkey, .{}) catch {
+        var args = std.process.args();
+        var arg0: ?[] const u8 = null;
+        while(args.next()) |arg| {
+            if(arg0 == null) {
+                arg0 = std.mem.span(arg.ptr);
+                continue;
+            }
+            if(std.mem.eql(u8,arg, "init")) {
+                // create lt sig key pair
+                const sk = try s_allocator.alloc(u8, sodium.crypto_sign_SECRETKEYBYTES);
+                defer s_allocator.free(sk);
+                const pk = try allocator.alloc(u8, sodium.crypto_sign_PUBLICKEYBYTES);
+                defer allocator.free(pk);
+                if(0!=sodium.crypto_sign_keypair(pk.ptr, sk.ptr)) {
+                    return SphinxError.Error;
+                }
+
+                if (posix.open(cfg.ltsigkey, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o600)) |f| {
+                    defer posix.close(f);
+                    const w = try posix.write(f, sk);
+                    if (w != sk.len) return SphinxError.Error;
+                } else |err| {
+                    warn("failed to save ltsigkey: {}\n", .{err});
+                    return SphinxError.Error;
+                }
+
+                const pubpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.ltsigkey, ".pub" });
+                defer allocator.free(pubpath);
+                if (posix.open(pubpath, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o666)) |f| {
+                    defer posix.close(f);
+                    const w = try posix.write(f, pk);
+                    if (w != pk.len) return SphinxError.Error;
+                } else |err| {
+                    warn("failed to save ltsigkey: {}\n", .{err});
+                    return SphinxError.Error;
+                }
+                warn("successfully created long-term signature key pair at:\n", .{});
+                warn("{s}\n", .{cfg.ltsigkey});
+                warn("and the public key - which you should make available to all clients -, is at:\n", .{});
+                warn("{s}.pub\n", .{cfg.ltsigkey});
+
+                const b64pk : []u8 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(pk[0..].len));
+                defer allocator.free(b64pk);
+                _ = std.base64.standard.Encoder.encode(b64pk, pk);
+                warn("The following is the base64 encoded public key that you can also share:\n{s}\n", .{b64pk});
+                break;
+            }
+        } else {
+            warn("Long-term signing key at {s} is not readable.\n", .{cfg.ltsigkey});
+            warn("You can generate one by running: {s} init\n", .{arg0 orelse "oracle"});
+            posix.exit(1);
+        }
+    };
+
     if (cfg.verbose) {
         warn("cfg.address: {s}\n", .{cfg.address});
         warn("cfg.port: {}\n", .{cfg.port});
@@ -953,15 +1027,22 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 }
 
 fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!void {
-    var ltsigkey: []u8 = undefined;
-    if (load_blob(s_allocator, cfg, ""[0..], cfg.ltsigkey, sodium.crypto_sign_SECRETKEYBYTES)) |b| {
-        ltsigkey = b;
+    const ltsigkey: []u8 = try s_allocator.alloc(u8, sodium.crypto_sign_SECRETKEYBYTES);
+    defer s_allocator.free(ltsigkey);
+
+    if (posix.open(cfg.ltsigkey, .{.ACCMODE = .RDONLY }, 0)) |f| {
+        defer posix.close(f);
+        const rs = try posix.read(f, ltsigkey);
+        if (rs != ltsigkey.len) {
+            if (cfg.verbose) warn("corrupted {s} size: {}\n", .{ cfg.ltsigkey, rs });
+            fail(s,cfg);
+        }
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {s}/{s} error: {}\n", .{ cfg.datadir, cfg.ltsigkey, err });
+            if (cfg.verbose) warn("cannot open {s} error: {}\n", .{ cfg.ltsigkey, err });
             fail(s, cfg);
         }
-        warn("no ltsigkey found at : {s}/{s}\n", .{cfg.datadir, cfg.ltsigkey});
+        warn("no ltsigkey found at : {s}\n", .{cfg.ltsigkey});
         fail(s,cfg);
     }
 
@@ -1145,14 +1226,16 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
 }
 
 /// this function evaluates the oprf and sends back beta
-fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
+fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
+    const ksize: u8 = if (! isv1) 33 else 32;
+
     var bail = false;
 
     var key: []u8 = undefined;
     //# 1st step OPRF with a new seed
     //# this might be if the user already has stored a blob for this id
     //# and now also wants a sphinx rwd
-    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 33)) |k| {
+    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], ksize)) |k| {
         key = k;
     } else |_| {
         // todo?
@@ -1173,13 +1256,27 @@ fn get(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         bail = true;
     }
 
-    //var beta: [32]u8 = undefined;
-    var beta = [_]u8{0} ** 33;
-    beta[0] = key[0];
+    var beta = try s_allocator.alloc(u8, ksize);
+    defer s_allocator.free(beta);
+    if(!isv1) beta[0] = key[0];
 
     if (bail) fail(s, cfg);
 
-    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &req.alpha, beta[1..].ptr)) fail(s, cfg);
+    if(!isv1) {
+        if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &req.alpha, beta[1..].ptr)) {
+            s_allocator.free(key); // sanitize
+            fail(s, cfg);
+        }
+    } else {
+        if (0 == sodium.crypto_core_ristretto255_is_valid_point(&req.alpha)) {
+            s_allocator.free(key); // sanitize
+            fail(s,cfg);
+        }
+        if(0!=sodium.crypto_scalarmult_ristretto255(beta[0..].ptr, key.ptr, &req.alpha)) {
+            s_allocator.free(key); // sanitize
+            fail(s,cfg);
+        }
+    }
     s_allocator.free(key); // sanitize
 
     var resp = try allocator.alloc(u8, beta.len + rules.len);
@@ -1215,7 +1312,7 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     var beta = [_]u8{0} ** 33;
     beta[0]=key[0];
 
-    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &alpha, &beta)) fail(s, cfg);
+    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &alpha, beta[1..].ptr)) fail(s, cfg);
 
     const betalen = try s.write(beta[0..]);
     try s.flush();
