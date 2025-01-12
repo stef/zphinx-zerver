@@ -124,6 +124,7 @@ const ReqType = enum(u8) {
     CHANGE = 0xaa,              // 1010 1010
     CREATE_DKG = 0xf0,
     DELETE = 0xff,              // 1111 1111
+    V1DELETE = 0xf9,            // 1111 1001
 };
 
 /// initial request sent from client
@@ -554,7 +555,10 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
             try change_dkg(cfg, s, req);
         },
         ReqType.DELETE => {
-            try delete(cfg, s, req);
+            try delete(cfg, s, req, false);
+        },
+        ReqType.V1DELETE => {
+            try delete(cfg, s, req, true);
         },
         ReqType.COMMIT => {
             try commit_undo(cfg, s, req, "new", "old");
@@ -871,7 +875,6 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     const idvec: @Vector(32, u8) = signedid[0..32].*;
     if(@reduce(std.builtin.ReduceOp.Or, idvec) == 0) return;
 
-
     const hexid = try tohexid(signedid[0..32].*);
     defer allocator.free(hexid);
 
@@ -964,7 +967,13 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         const msg = buf[0 .. end];
         const tmp = verify_blob(msg, pk[0..32].*) catch fail(s, cfg);
         const new_blob = tmp[0 .. end - 64];
-        save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
+        if(new_blob.len > 43) {
+            save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s, cfg);
+        } else if(new_blob.len == 43) {
+            const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid[0..] });
+            defer allocator.free(path);
+            std.fs.cwd().deleteTree(path) catch fail(s, cfg);
+        } else unreachable;
     }
 }
 
@@ -973,7 +982,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
 /// correctly to authorize whatever operation follows. the pubkey for
 /// the signature is stored in the directory indicated by the ID in
 /// the initial request from the client.
-fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
+fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
@@ -982,15 +991,26 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     }
 
     var resp : []u8 = undefined;
-    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 33)) |k| {
-        resp = try allocator.alloc(u8, 65);
+    if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], if(!isv1) 33 else 32)) |k| {
+        resp = try allocator.alloc(u8, if(!isv1) 65 else 64);
 
         resp[0]=k[0];
-        if (-1 == oprf.oprf_Evaluate(k[1..33].ptr, &req.alpha, resp[1..33].ptr)) fail(s, cfg);
+        if(!isv1) {
+            if (-1 == oprf.oprf_Evaluate(k[1..33].ptr, &req.alpha, resp[1..33].ptr)) fail(s, cfg);
+        } else {
+            if (0 == sodium.crypto_core_ristretto255_is_valid_point(&req.alpha)) {
+                s_allocator.free(k); // sanitize
+                fail(s,cfg);
+            }
+            if(0!=sodium.crypto_scalarmult_ristretto255(resp[0..32].ptr, k.ptr, &req.alpha)) {
+                s_allocator.free(k); // sanitize
+                fail(s,cfg);
+            }
+        }
 
         s_allocator.free(k);
 
-        sodium.randombytes_buf(resp[33..].ptr, 32); // nonce to sign
+        sodium.randombytes_buf(resp[(if(!isv1) 33 else 32)..].ptr, 32); // nonce to sign
     } else |_| {
         resp = try allocator.alloc(u8, 32);
         sodium.randombytes_buf(resp[0..].ptr, resp.len); // nonce to sign
@@ -1294,7 +1314,7 @@ fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror
 
 /// this op creates a new oprf key under the id, but stores it as "new", it must be "commited" to be set active
 fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req) catch fail(s, cfg);
+    auth(cfg, s, req, false) catch fail(s, cfg);
 
     var alpha: [32]u8 = undefined;
     // wait for alpha
@@ -1336,7 +1356,7 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
 }
 
 fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req) catch fail(s, cfg);
+    auth(cfg, s, req, false) catch fail(s, cfg);
 
     var alpha: [32]u8 = undefined;
     // wait for alpha
@@ -1382,13 +1402,13 @@ fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
 }
 
 /// this op deletes a complete id if it is authenticated, a host-username blob is also updated.
-fn delete(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
+fn delete(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    if (!utils.dir_exists(path)) fail(s, cfg);
+    auth(cfg, s, req, isv1) catch fail(s, cfg);
 
-    auth(cfg, s, req) catch fail(s, cfg);
+    if (!utils.dir_exists(path)) fail(s, cfg);
 
     update_blob(cfg, s) catch fail(s, cfg);
 
@@ -1407,7 +1427,7 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 
     if (!utils.dir_exists(path)) fail(s, cfg);
 
-    auth(cfg, s, req) catch fail(s, cfg);
+    auth(cfg, s, req, false) catch fail(s, cfg);
 
     // load all files to be shuffled around
     // start with the rules
@@ -1509,7 +1529,7 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 
 /// this op returns a requested blob
 fn read(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req) catch fail(s, cfg);
+    auth(cfg, s, req, false) catch fail(s, cfg);
 
     if (load_blob(allocator, cfg, req.id[0..], "blob", null)) |r| {
         _ = try s.write(r);
