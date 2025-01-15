@@ -24,9 +24,12 @@ Make sure that `libequihash.pc` and `sodium.pc` are available in
 `/usr/share/pkgconfig/` since zig seems to not be able to find other
 distro-specific directories like `/usr/lib/x86_64-linux-gnu/pkgconfig/`
 
-On a musl-based system just run `zig build -Drelease-safe=true` and be happy.
 
-On a production debian system this should work: `zig build install --prefix . -Drelease-safe=true -Dtarget=x86_64-linux-gnu.2.25`
+Clone the repo:
+
+`git clone --recursive https://github.com/stef/zphinx-zerver`
+
+Just run `zig build install --prefix . --release=safe` and be happy.
 
 You might want to give permission to bind to ports below 1024 (if you run this
 as recommended on port 433):
@@ -44,6 +47,10 @@ to create x509 cert/server key run this - **ONLY** for testing/demo, in producti
 openssl ecparam -genkey -out ssl_key.pem -name secp384r1
 openssl req -new -nodes -x509 -sha256 -key ssl_key.pem -out ssl_cert.pem -days 365 -subj '/CN=localhost'
 ```
+
+You must publish the file `ssl_cert.pem` if you use a self-signed certificate, so
+that your clients can include it in their configuration.
+
 Note currently zphinx only supports ECDSA key material. If other types of keys
 are required, uncomment the line containing `c.br_ssl_server_init_full_ec` in
 `oracle.zig` - and comment out the following line containing
@@ -56,6 +63,18 @@ in this list):
  - `~/.config/sphinx/config`
  - `~/.sphinxrc`
  - `./sphinx.cfg`
+
+If this is the first time running your oracle, you might want to initialize it
+by running:
+
+```
+./bin/oracle init
+```
+
+This will generate your long-term signing key for the threshold setup. You
+**SHOULD** publish either the file containing the public key, or the base64
+encoded string representing the public key so that other clients can use your
+server in a threshold setup.
 
 In case you want some logging to stdout to feed your favorite daemontools-like
 logger run oracle like this:
