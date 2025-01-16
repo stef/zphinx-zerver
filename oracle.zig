@@ -696,12 +696,6 @@ fn loadcfg() anyerror!Config {
         return LoadCfgError.InvalidRLDecay;
     }
 
-    std.fs.cwd().access(cfg.ssl_key, .{}) catch {
-        ssl_file_missing(cfg.ssl_key);
-    };
-    std.fs.cwd().access(cfg.ssl_cert, .{}) catch {
-        ssl_file_missing(cfg.ssl_cert);
-    };
     std.fs.cwd().access(cfg.ltsigkey, .{}) catch {
         var args = std.process.args();
         var arg0: ?[] const u8 = null;
@@ -755,6 +749,13 @@ fn loadcfg() anyerror!Config {
             warn("You can generate one by running: {s} init\n", .{arg0 orelse "oracle"});
             posix.exit(1);
         }
+    };
+
+    std.fs.cwd().access(cfg.ssl_key, .{}) catch {
+        ssl_file_missing(cfg.ssl_key);
+    };
+    std.fs.cwd().access(cfg.ssl_cert, .{}) catch {
+        ssl_file_missing(cfg.ssl_cert);
     };
 
     if (cfg.verbose) {
