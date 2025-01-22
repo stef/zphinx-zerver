@@ -379,12 +379,14 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(@alignCast(diff[0..]));
+        var save: bool = false;
         //if (cfg.verbose) warn("rl ctx {}\n", .{ctx});
         if(ctx.level >= Difficulties.len) {
             // invalid rl context, punish hard
             if (cfg.verbose) warn("invalid difficulty: {}\n", .{ ctx.level });
             ctx.level = Difficulties.len - 1;
             ctx.count=0;
+            save = true;
         } else if(now - cfg.rl_decay > ctx.ts and ctx.level>0) { // timestamp too long ago, let's decay
             const periods = @divTrunc((now - ctx.ts), cfg.rl_decay);
             if(ctx.level >= periods) {
@@ -393,17 +395,15 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
                 ctx.level = 0;
             }
             ctx.count=0;
-        } else { // let's slowly turn up the rate limiting
-            if(ctx.count >= cfg.rl_threshold and (ctx.level < Difficulties.len - 1)) {
-                ctx.count=0;
-                ctx.level+=1;
-            } else {
-                ctx.count+=1;
-            }
+            save = true;
         }
-        ctx.ts = now;
+
+        if(save) {
+            ctx.ts = now;
+            save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
+        }
+
         if(cfg.verbose) warn("rl difficulty: {}\n", .{ctx});
-        save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
         challenge.n=Difficulties[ctx.level].n;
         challenge.k=Difficulties[ctx.level].k;
 
@@ -426,7 +426,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         challenge.k = Difficulties[0].k;
         var ctx = RatelimitCTX{
             .level = 0,
-            .count = 1,
+            .count = 0,
             .ts = now,
         };
 
@@ -526,8 +526,25 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         warn("bad challenge solution\n",.{});
         fail(s,cfg);
     }
+
     // call handler with request
     const request = parse_req(cfg, s, req[0..reqlen]);
+
+    if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
+        var ctx: *RatelimitCTX = @ptrCast(@alignCast(diff[0..]));
+        if(ctx.count >= cfg.rl_threshold and (ctx.level < Difficulties.len - 1)) {
+            ctx.count=0;
+            ctx.level+=1;
+        } else {
+            ctx.count+=1;
+        }
+        ctx.ts = now;
+        save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
+    } else |err| {
+        if (cfg.verbose) warn("cannot open {s}/{s}/difficulty, error: {}\n", .{ cfg.datadir, request.id[0..], err });
+        fail(s, cfg);
+    }
+
     return handler(cfg, s, request);
 }
 
