@@ -72,12 +72,12 @@ const Config = struct {
     ltsigkey: [:0]const u8,
     /// maximum age still considered fresh, in seconds
     ts_epsilon: u64,
-    // decay ratelimit after rl_decay seconds
+    /// decay ratelimit after rl_decay seconds
     rl_decay: i64,
-    // increase hardness after rl_threshold attempts if not decaying
+    /// increase hardness after rl_threshold attempts if not decaying
     rl_threshold: u8,
-    // when checking freshness of puzzle solution, allow this extra
-    // gracetime in addition to the hardness max solution time
+    /// when checking freshness of puzzle solution, allow this extra
+    /// gracetime in addition to the hardness max solution time
     rl_gracetime: u16,
 };
 
@@ -708,6 +708,23 @@ fn loadcfg() anyerror!Config {
             return err;
         }
     }
+
+    var env = try std.process.getEnvMap(allocator);
+    defer env.deinit();
+    cfg.verbose = std.mem.eql(u8, env.get("ORACLE_VERBOSE") orelse "false","true");
+    cfg.address = if(env.get("ORACLE_ADDRESS")) |v| try allocator.dupe(u8, v) else cfg.address;
+    cfg.port = if(env.get("ORACLE_PORT")) |v| try std.fmt.parseInt(u16, v, 10) else cfg.port;
+    cfg.timeout = if(env.get("ORACLE_TIMEOUT")) |v| try std.fmt.parseInt(u16, v, 10) else cfg.timeout;
+    cfg.datadir = if(env.get("ORACLE_DATADIR")) |v| expandpath(v) else cfg.datadir;
+    cfg.max_kids = if(env.get("ORACLE_MAX_KIDS")) |v| try std.fmt.parseInt(u16, v, 10) else cfg.max_kids;
+    cfg.ssl_key = if(env.get("ORACLE_SSL_KEY")) |v| expandpath(v) else cfg.ssl_key;
+    cfg.ssl_cert = if(env.get("ORACLE_SSL_CERT")) |v| expandpath(v) else cfg.ssl_cert;
+    cfg.ltsigkey = if(env.get("ORACLE_LTSIGKEY")) |v| expandpath(v) else cfg.ltsigkey;
+    cfg.ts_epsilon = if(env.get("ORACLE_TS_EPSILON")) |v| try std.fmt.parseInt(u64, v, 10) else cfg.ts_epsilon;
+    cfg.rl_decay = if(env.get("ORACLE_RL_DECAY")) |v| try std.fmt.parseInt(i64, v, 10) else cfg.rl_decay;
+    cfg.rl_threshold = if(env.get("ORACLE_RL_THRESHOLD")) |v| try std.fmt.parseInt(u8, v, 10) else cfg.rl_threshold;
+    cfg.rl_gracetime = if(env.get("ORACLE_RL_GRACETIME")) |v| try std.fmt.parseInt(u16, v, 10) else cfg.rl_gracetime;
+
     if(cfg.rl_decay<1) {
         warn("rl_decay must be positive number, please check your config.\n",.{});
         return LoadCfgError.InvalidRLDecay;
