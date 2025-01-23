@@ -199,12 +199,14 @@ pub fn main() anyerror!void {
             conn = c;
         } else |e| {
             if(e==error.WouldBlock) {
-                const Status = if (builtin.link_libc) c_int else u32;
-                var status: Status = undefined;
-                const rc = posix.system.waitpid(-1, &status, posix.system.W.NOHANG);
-                if(rc>0) {
-                    kids.remove(mem.asBytes(&rc));
-                    warn("{} removing kid {} from pool\n",.{std.os.linux.getpid(), rc});
+                while(true) {
+                    const Status = if (builtin.link_libc) c_int else u32;
+                    var status: Status = undefined;
+                    const rc = posix.system.waitpid(-1, &status, posix.system.W.NOHANG);
+                    if(rc>0) {
+                        kids.remove(mem.asBytes(&rc));
+                        warn("{} removing kid {} from pool\n",.{std.os.linux.getpid(), rc});
+                    } else break;
                 }
                 continue;
             }
