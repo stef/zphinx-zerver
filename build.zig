@@ -4,16 +4,20 @@ pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const pie = b.option(bool, "pie", "Build a Position Independent Executable") orelse true;
+    const relro = b.option(bool, "relro", "Force all relocations to be read-only after processing") orelse true;
+
     const exe = b.addExecutable(.{
         .name = "oracle",
         .root_source_file = .{
-            .src_path = .{
-                .owner = b,
-                .sub_path = "oracle.zig" },
+            .src_path = .{ .owner = b, .sub_path = "oracle.zig" },
         },
         .target = target,
         .optimize = optimize,
     });
+
+    exe.pie = pie;
+    exe.link_z_relro = relro;
 
     exe.addIncludePath(b.path("."));
 
