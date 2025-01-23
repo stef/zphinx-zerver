@@ -875,7 +875,7 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
         const w = try posix.write(f, blob);
         if (w != blob.len) return SphinxError.Error;
     } else |err| {
-        log("saveblob: {}\n", .{err}, "");
+        log("saveblob open({s}) failed {}\n", .{fpath, err}, "");
         return SphinxError.Error;
     }
 }
@@ -921,10 +921,15 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     //if(cfg.verbose) warn("ub: {x:0>192}\n", .{signedid});
 
     const idvec: @Vector(32, u8) = signedid[0..32].*;
-    if(@reduce(std.builtin.ReduceOp.Or, idvec) == 0) return;
+    if(@reduce(std.builtin.ReduceOp.Or, idvec) == 0) {
+        log("skipping updating blob\n", .{}, "");
+        return;
+    }
 
     const hexid = try tohexid(signedid[0..32].*);
     defer allocator.free(hexid);
+
+    log("updating blob\n", .{}, hexid);
 
     var blob: []u8 = undefined;
     var new = false;
@@ -968,59 +973,107 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
 
     const bw = write_pkt(s, blob) catch fail(s);
     allocator.free(blob);
-    if (bw != blob.len) fail(s);
+    if (bw != blob.len) {
+        log("truncated write of blob sent only {} out of {}\n", .{bw, blob.len}, hexid);
+        fail(s);
+    }
     try s.flush();
 
     if (new) {
         var buf = [_]u8{0} ** (2 + 32 + 64 + 65536);
         // read pubkey
         const pklen = try s.read(buf[0..32]);
-        if (pklen != 32) fail(s);
+        if (pklen != 32) {
+            log("failed to read pubkey, short read, only {} bytes\n", .{pklen}, hexid);
+            fail(s);
+        }
         pk = buf[0..32].*;
 
         // read blob size
-        const x = try s.read(buf[32..34]);
+        const x = s.read(buf[32..34]) catch |err| {
+            log("error reading blob size: {}", .{err}, hexid);
+            fail(s);
+        };
         if (x != 2) fail(s);
         const bloblen = std.mem.readInt(u16, buf[32..34], std.builtin.Endian.big);
         // read blob
         const end = 34 + @as(u17,bloblen) + 64;
-        const recvd = read_pkt(s, buf[34..end]) catch fail(s);
-        if(recvd != end - 34) fail(s);
+        const recvd = read_pkt(s, buf[34..end]) catch |err| {
+            log("error reading blob: {}", .{err}, hexid);
+            fail(s);
+        };
+        if(recvd != end - 34) {
+            log("received {} instead expected size of blob ({})\n", .{recvd, end - 34}, hexid);
+            fail(s);
+        }
         const msg = buf[0 .. end];
-        const tmp = verify_blob(msg, pk) catch fail(s);
+        const tmp = verify_blob(msg, pk) catch |err| {
+            log("failed to verify blob: {}\n", .{err}, hexid);
+            fail(s);
+        };
         const new_blob = tmp[32 .. end - 64];
         if (!utils.dir_exists(cfg.datadir)) {
-            posix.mkdir(cfg.datadir, 0o700) catch fail(s);
+            posix.mkdir(cfg.datadir, 0o700) catch |err| {
+                log("failed to create {s}, error: {}\n", .{cfg.datadir, err}, hexid);
+                fail(s);
+            };
         }
 
         const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
         defer allocator.free(tdir);
 
         if (!utils.dir_exists(tdir)) {
-            posix.mkdir(tdir, 0o700) catch fail(s);
+            posix.mkdir(tdir, 0o700) catch |err| {
+                log("failed to create {s}, error: {}\n", .{tdir, err}, hexid);
+                fail(s);
+            };
         }
-        save_blob(cfg, hexid[0..], "pub", pk[0..]) catch fail(s);
-        save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s);
+        save_blob(cfg, hexid[0..], "pub", pk[0..]) catch |err| {
+            log("failed to save pubkey: {}\n",.{err},hexid);
+            fail(s);
+        };
+        save_blob(cfg, hexid[0..], "blob", new_blob) catch |err| {
+            log("failed to save blob: {}\n",.{err},hexid);
+            fail(s);
+        };
     } else {
         // read pubkey
         var buf = [_]u8{0} ** (2 + 64 + 65536);
         // read blob size
-        const x = try s.read(buf[0..2]);
+        const x = s.read(buf[0..2]) catch |err| {
+            log("error reading blob size: {}", .{err}, hexid);
+            fail(s);
+        };
         if (x != 2) fail(s);
         const bloblen = std.mem.readInt(u16, buf[0..2], std.builtin.Endian.big);
         const end = 2 + @as(u17,bloblen) + 64;
         // read blob
-        const recvd = read_pkt(s, buf[2..end]) catch fail(s);
-        if(recvd != end - 2) fail(s);
+        const recvd = read_pkt(s, buf[2..end]) catch |err| {
+            log("error reading blob: {}", .{err}, hexid);
+            fail(s);
+        };
+        if(recvd != end - 2) {
+            log("received {} instead expected size of blob ({})\n", .{recvd, end - 2}, hexid);
+            fail(s);
+        }
         const msg = buf[0 .. end];
-        const tmp = verify_blob(msg, pk[0..32].*) catch fail(s);
+        const tmp = verify_blob(msg, pk[0..32].*) catch |err| {
+            log("failed to verify blob: {}\n", .{err}, hexid);
+            fail(s);
+        };
         const new_blob = tmp[0 .. end - 64];
         if(new_blob.len > 43) {
-            save_blob(cfg, hexid[0..], "blob", new_blob) catch fail(s);
+            save_blob(cfg, hexid[0..], "blob", new_blob) catch |err| {
+                log("failed to save blob: {}\n",.{err},hexid);
+                fail(s);
+            };
         } else if(new_blob.len == 43) {
             const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid[0..] });
             defer allocator.free(path);
-            std.fs.cwd().deleteTree(path) catch fail(s);
+            std.fs.cwd().deleteTree(path) catch |err| {
+                log("failed to delete empty userblob record: {}\n",.{err},hexid);
+                fail(s);
+            };
         } else unreachable;
     }
 }
@@ -1034,7 +1087,8 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
-    } else |_| {
+    } else |err| {
+        log("[auth] failed to load pubkey: {}\n",.{err},req.id[0..]);
         fail(s);
     }
 
@@ -1044,14 +1098,19 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
 
         resp[0]=k[0];
         if(!isv1) {
-            if (-1 == oprf.oprf_Evaluate(k[1..33].ptr, &req.alpha, resp[1..33].ptr)) fail(s);
+            if (-1 == oprf.oprf_Evaluate(k[1..33].ptr, &req.alpha, resp[1..33].ptr)) {
+                log("invalid alpha, it is not on the curve\n", .{}, req.id[0..]);
+                fail(s);
+            }
         } else {
             if (0 == sodium.crypto_core_ristretto255_is_valid_point(&req.alpha)) {
                 s_allocator.free(k); // sanitize
+                log("invalid alpha, it is not on the curve\n", .{}, req.id[0..]);
                 fail(s);
             }
             if(0!=sodium.crypto_scalarmult_ristretto255(resp[0..32].ptr, k.ptr, &req.alpha)) {
                 s_allocator.free(k); // sanitize
+                log("failed to compute beta = alpha * k\n", .{}, req.id[0..]);
                 fail(s);
             }
         }
@@ -1060,17 +1119,29 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
 
         sodium.randombytes_buf(resp[(if(!isv1) 33 else 32)..].ptr, 32); // nonce to sign
     } else |_| {
+        log("failed to load key, faking response\n", .{}, req.id[0..]);
         resp = try allocator.alloc(u8, 32);
         sodium.randombytes_buf(resp[0..].ptr, resp.len); // nonce to sign
     }
     defer allocator.free(resp);
 
-    const rlen = try s.write(resp[0..]);
-    try s.flush();
-    if (rlen != resp.len) fail(s);
+    const rlen = s.write(resp[0..]) catch |err| {
+        log("failed to write auth response: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush auth response: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if (rlen != resp.len) {
+        log("short write of auth response, only {} instead of {} written.\n", .{rlen, resp.len}, req.id[0..]);
+        fail(s);
+    }
+    log("[auth] sent ",.{}, req.id[0..]);
     if(cfg.verbose) {
-        log("[auth] sent ",.{}, req.id[0..]);
         utils.hexdump(resp[0..]);
+    } else {
+        warn("\n",.{});
     }
     var sig = [_]u8{0} ** 64;
     if (s.read(sig[0..sig.len])) |siglen| {
@@ -1090,8 +1161,14 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
         fail(s);
     }
 
-    _ = try s.write("\x00\x04auth");
-    _ = try s.flush();
+    _ = s.write("\x00\x04auth") catch |err| {
+        log("failed to write auth:ok message: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    _ = s.flush() catch |err| {
+        log("failed to write auth:ok message: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
 }
 
 fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!void {
@@ -1114,6 +1191,7 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
         fail(s);
     }
 
+
     var peer = workaround.new_peerstate();
     defer workaround.del_peerstate(@ptrCast(&peer));
 
@@ -1124,6 +1202,7 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
     }
     const n = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).n;
     const t = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).t;
+    log("starting dkg(n={}, t={})\n", .{n, t}, "");
     const peer_sig_pks: [][sodium.crypto_sign_PUBLICKEYBYTES]u8 = try allocator.alloc([sodium.crypto_sign_PUBLICKEYBYTES]u8, n);
     defer allocator.free(peer_sig_pks);
     const peer_noise_pks: [][sodium.crypto_scalarmult_BYTES]u8 = try allocator.alloc([sodium.crypto_scalarmult_BYTES]u8, n);
@@ -1155,13 +1234,17 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
     while(tp_dkg.tpdkg_peer_not_done(@ptrCast(peer))!=0) {
         var msg : []u8 = try allocator.alloc(u8, tp_dkg.tpdkg_peer_input_size(@ptrCast(peer)));
         defer allocator.free(msg);
+        const cur_step = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).step;
         if(msg.len > 0) {
-            const msglen = try read_pkt(s, msg[0..msg.len]);
+            const msglen = read_pkt(s, msg[0..msg.len]) catch |err| {
+                log("failed to read step{} message from TP: {}\n", .{cur_step, err}, "");
+                return err;
+            };
             if (msglen != msg.len) {
+                log("incorrect length of message step{} message from TP: expected: {}B, received {}B\n", .{cur_step, msg.len, msglen}, "");
                 fail(s);
             }
         }
-        const cur_step = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).step;
         const resp_size = tp_dkg.tpdkg_peer_output_size(@ptrCast(peer));
         const resp : []u8 = try allocator.alloc(u8, resp_size);
         defer allocator.free(resp);
@@ -1172,13 +1255,20 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
             fail(s);
         }
         if(resp.len>0) {
-            const bw = write_pkt(s, resp) catch fail(s);
-            if (bw != resp.len) fail(s);
+            const bw = write_pkt(s, resp) catch |err| {
+                log("failed to write response in step {} to TP: {}\n", .{cur_step, err}, "");
+                fail(s);
+            };
+            if (bw != resp.len) {
+                log("incorrect length of message step{} message to TP: expected: {}B, received {}B\n", .{cur_step, resp.len, bw}, "");
+                fail(s);
+            }
             try s.flush();
         }
     }
 
     workaround.extract_share(@ptrCast(peer), share.ptr);
+    log("dkg success\n", .{}, "");
 }
 
 /// this op creates an oprf key, stores it with an associated pubkey
@@ -1186,7 +1276,10 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
 fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     const tdir = mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..]}) catch fail(s);
     defer allocator.free(tdir);
-    if (utils.dir_exists(tdir)) fail(s);
+    if (utils.dir_exists(tdir)) {
+        log("attempted to create a record, that already exists\n", .{}, req.id[0..]);
+        fail(s);
+    }
 
     const key: []u8 = try s_allocator.alloc(u8, 33);
     defer s_allocator.free(key);
@@ -1196,15 +1289,25 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     var beta = [_]u8{0} ** 33;
     beta[0]=key[0];
 
-    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &req.alpha, beta[1..].ptr)) fail(s);
+    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &req.alpha, beta[1..].ptr)) {
+        log("failed to calculate beta = alpha * k\n", .{}, req.id[0..]);
+        fail(s);
+    }
 
-    _ = try s.write(beta[0..]);
-    try s.flush();
+    _ = s.write(beta[0..]) catch |err| {
+        log("failed to send beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
 
     var buf: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rule, signature
     //# wait for auth signing pubkey and rules
     const msglen = try read_pkt(s, buf[0..buf.len]);
     if (msglen != buf.len) {
+        log("failed to receive record only {}B instead of the expected {}B\n", .{msglen, buf.len}, req.id[0..]);
         fail(s);
     }
 
@@ -1213,40 +1316,81 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     };
     const resp: *CreateResp = @ptrCast(buf[0..]);
 
-    const blob = verify_blob(buf[0..], resp.pk) catch fail(s);
+    const blob = verify_blob(buf[0..], resp.pk) catch |err| {
+        log("failed to verify blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
     const rules = blob[32..];
 
     // 3rd phase
     // add user to host record
-    update_blob(cfg, s) catch fail(s);
+    update_blob(cfg, s) catch |err| {
+        log("failed to add user to user list blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     if (!utils.dir_exists(cfg.datadir)) {
-        posix.mkdir(cfg.datadir, 0o700) catch fail(s);
+        posix.mkdir(cfg.datadir, 0o700) catch |err| {
+            log("failed to create {s}, error: {}\n", .{cfg.datadir, err}, req.id[0..]);
+            fail(s);
+        };
     }
-    posix.mkdir(tdir, 0o700) catch fail(s);
+    posix.mkdir(tdir, 0o700) catch |err| {
+        log("failed to create {s}, error: {}\n", .{tdir, err}, req.id[0..]);
+        fail(s);
+    };
 
-    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s);
-    save_blob(cfg, req.id[0..], "key", key) catch fail(s);
-    save_blob(cfg, req.id[0..], "rules", rules) catch fail(s);
+    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch |err| {
+            log("failed to save pubkey: {}\n",.{err},req.id[0..]);
+            fail(s);
+        };
 
-    _ = try s.write("ok");
-    try s.flush();
+    save_blob(cfg, req.id[0..], "key", key) catch |err| {
+            log("failed to save key: {}\n",.{err},req.id[0..]);
+            fail(s);
+        };
+
+    save_blob(cfg, req.id[0..], "rules", rules) catch |err| {
+            log("failed to save rules: {}\n",.{err},req.id[0..]);
+            fail(s);
+        };
+
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of create: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of create: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("create successful\n", .{}, req.id[0..]);
 }
 
 fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     const tdir = mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..]}) catch fail(s);
     defer allocator.free(tdir);
-    if (utils.dir_exists(tdir)) fail(s);
+    if (utils.dir_exists(tdir)) {
+        log("attempted to create a record, that already exists\n", .{}, req.id[0..]);
+        fail(s);
+    }
+    log("running dkg for create op\n", .{}, req.id[0..]);
 
     var msg0 = mem.zeroes([tp_dkg.tpdkg_msg0_SIZE]u8);
-    const msg0len = try s.read(msg0[0..]);
+    const msg0len = s.read(msg0[0..]) catch |err| {
+        log("failed to read initial dkg message: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
     if(msg0len != msg0.len) {
+        log("dkg msg0 is only {} B instead of the expected {} B\n", .{msg0len, msg0.len}, req.id[0..]);
         fail(s);
     }
 
     const share = try s_allocator.alloc(u8, 33);
     defer s_allocator.free(share);
-    try dkg(cfg, s, msg0[0..], share[0..]);
+    dkg(cfg, s, msg0[0..], share[0..]) catch |err| {
+        log("dkg failed: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
     if(DEBUG) {
         log("[dkg] share ",.{}, req.id[0..]);
         utils.hexdump(share[0..]);
@@ -1255,16 +1399,29 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
     var beta = [_]u8{0} ** 33;
     beta[0] = share[0];
 
-    if (-1 == oprf.oprf_Evaluate(share[1..].ptr, &req.alpha, beta[1..].ptr)) fail(s);
+    if (-1 == oprf.oprf_Evaluate(share[1..].ptr, &req.alpha, beta[1..].ptr)) {
+        log("failed to calculate beta = alpha * k\n", .{}, req.id[0..]);
+        fail(s);
+    }
 
-    const betalen = try s.write(beta[0..]);
-    try s.flush();
-    if(betalen!=beta.len) fail(s);
+    const betalen = s.write(beta[0..]) catch |err| {
+        log("failed to send beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(betalen!=beta.len) {
+        log("only sent {} B of beta instead of the expected {} B\n", .{betalen, beta.len}, req.id[0..]);
+        fail(s);
+    }
 
     var buf: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rule, signature
     //# wait for auth signing pubkey and rules
     const msglen = try read_pkt(s, buf[0..buf.len]);
     if (msglen != buf.len) {
+        log("failed to receive record only {}B instead of the expected {}B\n", .{msglen, buf.len}, req.id[0..]);
         fail(s);
     }
 
@@ -1273,31 +1430,57 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
     };
     const resp: *CreateResp = @ptrCast(buf[0..]);
 
-    const blob = verify_blob(buf[0..], resp.pk) catch fail(s);
+    const blob = verify_blob(buf[0..], resp.pk) catch |err| {
+        log("failed to verify blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
     const rules = blob[32..];
 
     // 3rd phase
     // add user to host record
-    update_blob(cfg, s) catch fail(s);
+    update_blob(cfg, s) catch |err| {
+        log("failed to add user to user list blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     if (!utils.dir_exists(cfg.datadir)) {
-        posix.mkdir(cfg.datadir, 0o700) catch fail(s);
+        posix.mkdir(cfg.datadir, 0o700) catch |err| {
+            log("failed to create {s}, error: {}\n", .{cfg.datadir, err}, req.id[0..]);
+            fail(s);
+        };
     }
-    posix.mkdir(tdir, 0o700) catch fail(s);
+    posix.mkdir(tdir, 0o700) catch |err| {
+        log("failed to create {s}, error: {}\n", .{tdir, err}, req.id[0..]);
+        fail(s);
+    };
 
-    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch fail(s);
-    save_blob(cfg, req.id[0..], "key", share) catch fail(s);
-    save_blob(cfg, req.id[0..], "rules", rules) catch fail(s);
+    save_blob(cfg, req.id[0..], "pub", resp.pk[0..]) catch |err| {
+        log("failed to save pubkey: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
+    save_blob(cfg, req.id[0..], "key", share) catch |err| {
+        log("failed to save share: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
+    save_blob(cfg, req.id[0..], "rules", rules) catch |err| {
+        log("failed to save rules: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
 
-    _ = try s.write("ok");
-    try s.flush();
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of dkg create: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of dkg create: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("dkg create successful\n", .{}, req.id[0..]);
 }
 
 /// this function evaluates the oprf and sends back beta
 fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
     const ksize: u8 = if (! isv1) 33 else 32;
-
-    var bail = false;
 
     var key: []u8 = undefined;
     //# 1st step OPRF with a new seed
@@ -1305,42 +1488,42 @@ fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror
     //# and now also wants a sphinx rwd
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], ksize)) |k| {
         key = k;
-    } else |_| {
+    } else |err| {
+        log("couldn't load key: {}\n", .{err}, req.id[0..]);
         // todo?
         //key = try s_allocator.alloc(u8, 32);
         // todo should actually be always the same for repeated alphas
         // possibly use an hmac to calculate this. but that introduces a timing side chan....
         //sodium.randombytes_buf(&key, key.len);
-        bail = true;
+        fail(s);
     }
 
     var rules: []u8 = undefined;
-    //# 1st step OPRF with a new seed
-    //# this might be if the user already has stored a blob for this id
-    //# and now also wants a sphinx rwd
     if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], null)) |r| {
         rules = r;
-    } else |_| {
-        bail = true;
+    } else |err| {
+        log("couldn't load rules: {}\n", .{err}, req.id[0..]);
+        fail(s);
     }
 
     var beta = try s_allocator.alloc(u8, ksize);
     defer s_allocator.free(beta);
     if(!isv1) beta[0] = key[0];
 
-    if (bail) fail(s);
-
     if(!isv1) {
         if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &req.alpha, beta[1..].ptr)) {
+            log("failed to calculate beta = alpha * k\n", .{}, req.id[0..]);
             s_allocator.free(key); // sanitize
             fail(s);
         }
     } else {
         if (0 == sodium.crypto_core_ristretto255_is_valid_point(&req.alpha)) {
+            log("invalid alpha, it is not on the curve\n", .{}, req.id[0..]);
             s_allocator.free(key); // sanitize
             fail(s);
         }
         if(0!=sodium.crypto_scalarmult_ristretto255(beta[0..].ptr, key.ptr, &req.alpha)) {
+            log("failed to compute beta = alpha * k\n", .{}, req.id[0..]);
             s_allocator.free(key); // sanitize
             fail(s);
         }
@@ -1355,24 +1538,40 @@ fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror
 
     allocator.free(rules);
 
-    _ = try s.write(resp[0..]);
-
-    try s.flush();
+    _ = s.write(resp[0..]) catch |err| {
+        log("failed to write response: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush response: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("get successful\n", .{}, req.id[0..]);
 }
 
 /// this op creates a new oprf key under the id, but stores it as "new", it must be "commited" to be set active
 fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch fail(s);
+    auth(cfg, s, req, false) catch |err| {
+        log("failed to auth for change op: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     var alpha: [32]u8 = undefined;
     // wait for alpha
-    const msglen = try s.read(alpha[0..]);
+    const msglen = s.read(alpha[0..]) catch |err| {
+        log("failed to read alpha for change op: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
     if (msglen != alpha.len) {
-         fail(s);
+        log("read only {} B while receiving alpha, expected {} B\n", .{msglen, alpha.len}, req.id[0..]);
+        fail(s);
     }
 
     var key = [_]u8{0} ** 33;
-    if(0!=sodium.sodium_mlock(&key,key.len)) fail(s);
+    if(0!=sodium.sodium_mlock(&key,key.len)) {
+        log("failed to mlock key\n", .{}, req.id[0..]);
+        fail(s);
+    }
     sodium.randombytes_buf(key[1..].ptr, 32);
     key[0]=1;
 
@@ -1380,73 +1579,166 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     var beta = [_]u8{0} ** 33;
     beta[0]=key[0];
 
-    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &alpha, beta[1..].ptr)) fail(s);
+    if (-1 == oprf.oprf_Evaluate(key[1..].ptr, &alpha, beta[1..].ptr)) {
+        log("invalid alpha, it is not on the curve\n", .{}, req.id[0..]);
+        fail(s);
+    }
 
-    const betalen = try s.write(beta[0..]);
-    try s.flush();
-    if(betalen!=beta.len) fail(s);
+    const betalen = s.write(beta[0..]) catch |err| {
+        log("failed to send beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(betalen!=beta.len) {
+        log("only sent {} B of beta instead of the expected {} B\n", .{betalen, beta.len}, req.id[0..]);
+        fail(s);
+    }
 
     var signedpub: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rules, sig
-    const signedpublen = try s.read(signedpub[0..]);
-    if(signedpublen != signedpub.len) fail(s);
+    const signedpublen = s.read(signedpub[0..]) catch |err| {
+        log("failed to read signed pubkey: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(signedpublen != signedpub.len) {
+        log("while receiving signed pubkey received only {} B, while expecting {} B\n", .{signedpublen, signedpub.len}, req.id[0..]);
+        fail(s);
+    }
     const pk = signedpub[0..32];
-    _ = verify_blob(signedpub[0..], pk.*) catch fail(s);
+    _ = verify_blob(signedpub[0..], pk.*) catch |err| {
+        log("failed to verify blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     const rules = signedpub[32..32+RULE_SIZE];
 
-    save_blob(cfg, req.id[0..], "new", key[0..]) catch fail(s);
+    save_blob(cfg, req.id[0..], "new", key[0..]) catch |err| {
+        log("failed to save new key: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
     _ = sodium.sodium_munlock(&key,32);
-    save_blob(cfg, req.id[0..], "rules.new", rules[0..]) catch fail(s);
-    save_blob(cfg, req.id[0..], "pub.new", pk[0..]) catch fail(s);
+    save_blob(cfg, req.id[0..], "rules.new", rules[0..]) catch |err| {
+        log("failed to save rules.new: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
+    save_blob(cfg, req.id[0..], "pub.new", pk[0..]) catch |err| {
+        log("failed to save new pubkey: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
 
-    _ = try s.write("ok");
-    try s.flush();
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("change successful\n", .{}, req.id[0..]);
 }
 
 fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch fail(s);
+    auth(cfg, s, req, false) catch |err| {
+        log("failed to auth for change op: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
+    log("running dkg for change op\n", .{}, req.id[0..]);
 
     var alpha: [32]u8 = undefined;
     // wait for alpha
-    const msglen = try s.read(alpha[0..]);
+    const msglen = s.read(alpha[0..]) catch |err| {
+        log("failed to read alpha for change op: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
     if (msglen != alpha.len) {
-         fail(s);
+        log("read only {} B while receiving alpha, expected {} B\n", .{msglen, alpha.len}, req.id[0..]);
+        fail(s);
     }
 
     var msg0 = mem.zeroes([tp_dkg.tpdkg_msg0_SIZE]u8);
-    const msg0len = try s.read(msg0[0..]);
+    const msg0len = s.read(msg0[0..]) catch |err| {
+        log("failed to read initial dkg message: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
     if(msg0len != msg0.len) {
+        log("dkg msg0 is only {} B instead of the expected {} B\n", .{msg0len, msg0.len}, req.id[0..]);
         fail(s);
     }
 
     const share = try s_allocator.alloc(u8, 33);
     defer s_allocator.free(share);
-    try dkg(cfg, s, msg0[0..], share[0..]);
+    dkg(cfg, s, msg0[0..], share[0..]) catch |err| {
+        log("dkg failed: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(DEBUG) {
+        log("[dkg] share ",.{}, req.id[0..]);
+        utils.hexdump(share[0..]);
+    }
 
     var beta = [_]u8{0} ** 33;
     beta[0] = share[0];
 
-    if (-1 == oprf.oprf_Evaluate(share[1..].ptr, &alpha, beta[1..].ptr)) fail(s);
+    if (-1 == oprf.oprf_Evaluate(share[1..].ptr, &alpha, beta[1..].ptr)) {
+        log("failed to calculate beta = alpha * k\n", .{}, req.id[0..]);
+        fail(s);
+    }
     //var beta: [32]u8 = undefined;
 
-    const betalen = try s.write(beta[0..]);
-    try s.flush();
-    if(betalen!=beta.len) fail(s);
+    const betalen = s.write(beta[0..]) catch |err| {
+        log("failed to send beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush beta: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(betalen!=beta.len) {
+        log("only sent {} B of beta instead of the expected {} B\n", .{betalen, beta.len}, req.id[0..]);
+        fail(s);
+    }
 
     var signedpub: [32 + RULE_SIZE + 64]u8 = undefined; // pubkey, rules, sig
-    const signedpublen = try s.read(signedpub[0..]);
-    if(signedpublen != signedpub.len) fail(s);
+    const signedpublen = s.read(signedpub[0..]) catch |err| {
+        log("failed to read signed pubkey: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    if(signedpublen != signedpub.len) {
+        log("while receiving signed pubkey received only {} B, while expecting {} B\n", .{signedpublen, signedpub.len}, req.id[0..]);
+        fail(s);
+    }
     const pk = signedpub[0..32];
-    _ = verify_blob(signedpub[0..], pk.*) catch fail(s);
+    _ = verify_blob(signedpub[0..], pk.*) catch |err| {
+        log("failed to verify blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     const rules = signedpub[32..32+RULE_SIZE];
 
-    save_blob(cfg, req.id[0..], "new", share[0..]) catch fail(s);
-    save_blob(cfg, req.id[0..], "rules.new", rules[0..]) catch fail(s);
-    save_blob(cfg, req.id[0..], "pub.new", pk[0..]) catch fail(s);
+    save_blob(cfg, req.id[0..], "new", share[0..]) catch |err| {
+        log("failed to save new share: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
+    save_blob(cfg, req.id[0..], "rules.new", rules[0..]) catch |err| {
+        log("failed to save rules.new: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
+    save_blob(cfg, req.id[0..], "pub.new", pk[0..]) catch |err| {
+        log("failed to save new pubkey: {}\n",.{err},req.id[0..]);
+        fail(s);
+    };
 
-    _ = try s.write("ok");
-    try s.flush();
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("threshold change successful\n", .{}, req.id[0..]);
 }
 
 /// this op deletes a complete id if it is authenticated, a host-username blob is also updated.
@@ -1454,16 +1746,35 @@ fn delete(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyer
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    auth(cfg, s, req, isv1) catch fail(s);
+    auth(cfg, s, req, isv1) catch |err| {
+        log("failed to auth for delete op: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
-    if (!utils.dir_exists(path)) fail(s);
+    if (!utils.dir_exists(path)) {
+        log("record does not exist at {s}\n", .{path}, req.id[0..]);
+        fail(s);
+    }
 
-    update_blob(cfg, s) catch fail(s);
+    update_blob(cfg, s) catch |err| {
+        log("failed to remove user from user list blob: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
-    std.fs.cwd().deleteTree(path) catch fail(s);
+    std.fs.cwd().deleteTree(path) catch |err| {
+        log("failed to delete record {s}: {}\n", .{path, err}, req.id[0..]);
+        fail(s);
+    };
 
-    _ = try s.write("ok");
-    try s.flush();
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("delete successful\n", .{}, req.id[0..]);
 }
 
 /// this generic function implements both commit and undo. essentially
@@ -1478,7 +1789,10 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
         fail(s);
     }
 
-    auth(cfg, s, req, false) catch fail(s);
+    auth(cfg, s, req, false) catch |err| {
+        log("failed to auth for commit/undo op: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     // load all files to be shuffled around
     // start with the rules
@@ -1487,16 +1801,16 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     defer allocator.free(new_rulespath);
     if (load_blob(allocator, cfg, req.id[0..], new_rulespath, RULE_SIZE)) |r| {
         new_rules = r;
-    } else |_| {
-        log("path {s}/{s}/{s} doesn't exist\n", .{cfg.datadir, req.id[0..], new_rulespath}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], new_rulespath, err}, req.id[0..]);
         fail(s);
     }
     defer allocator.free(new_rules);
     var cur_rules: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "rules"[0..], RULE_SIZE)) |r| {
         cur_rules = r;
-    } else |_| {
-        log("path {s}/{s}/{s} doesn't exist\n", .{cfg.datadir, req.id[0..], "rules"}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], "rules", err}, req.id[0..]);
         fail(s);
     }
     defer allocator.free(cur_rules);
@@ -1507,16 +1821,16 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     defer allocator.free(new_pubpath);
     if (load_blob(allocator, cfg, req.id[0..], new_pubpath, 32)) |r| {
         new_pub = r;
-    } else |_| {
-        log("path {s}/{s}/{s} doesn't exist\n", .{cfg.datadir, req.id[0..], new_pubpath[0..]}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], new_pubpath[0..], err}, req.id[0..]);
         fail(s);
     }
     defer allocator.free(new_pub);
     var cur_pub: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |r| {
         cur_pub = r;
-    } else |_| {
-        log("path {s}/{s}/pub doesn't exist\n", .{cfg.datadir, req.id[0..]}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/pub: {}\n", .{cfg.datadir, req.id[0..], err}, req.id[0..]);
         fail(s);
     }
     defer allocator.free(cur_pub);
@@ -1525,15 +1839,15 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     var new_key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], new[0..], 33)) |r| {
         new_key = r;
-    } else |_| {
-        log("path {s}/{s}/{s} doesn't exist\n", .{cfg.datadir, req.id[0..], new[0..]}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], new[0..], err}, req.id[0..]);
         fail(s);
     }
     var cur_key: []u8 = undefined;
     if (load_blob(s_allocator, cfg, req.id[0..], "key"[0..], 33)) |r| {
         cur_key = r;
-    } else |_| {
-        log("path {s}/{s}/key doesn't exist\n", .{cfg.datadir, req.id[0..]}, req.id[0..]);
+    } else |err| {
+        log("cannot load {s}/{s}/key: {}\n", .{cfg.datadir, req.id[0..], err}, req.id[0..]);
         s_allocator.free(new_key);
         fail(s);
     }
@@ -1546,67 +1860,95 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
     defer allocator.free(old_rulespath);
 
     // first save the keys
-    save_blob(cfg, req.id[0..], old, cur_key) catch {
+    save_blob(cfg, req.id[0..], old, cur_key) catch |err| {
         s_allocator.free(cur_key);
         s_allocator.free(new_key);
-        log("cannot save to {s}/{s}/{s}\n", .{cfg.datadir, req.id[0..], old}, req.id[0..]);
+        log("cannot save to {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], old, err}, req.id[0..]);
         fail(s);
     };
     s_allocator.free(cur_key);
 
-    save_blob(cfg, req.id[0..], "key", new_key) catch {
-        log("cannot save to {s}/{s}/key\n", .{cfg.datadir, req.id[0..]}, req.id[0..]);
+    save_blob(cfg, req.id[0..], "key", new_key) catch |err| {
+        log("cannot save to {s}/{s}/key: {}\n", .{cfg.datadir, req.id[0..], err}, req.id[0..]);
         s_allocator.free(new_key);
         fail(s);
     };
     s_allocator.free(new_key);
 
     // now save the rules and pubkeys
-    save_blob(cfg, req.id[0..], old_rulespath, cur_rules) catch {
-        log("cannot save to {s}/{s}/{s}\n", .{cfg.datadir, req.id[0..], old_rulespath}, req.id[0..]);
+    save_blob(cfg, req.id[0..], old_rulespath, cur_rules) catch |err| {
+        log("cannot save to {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], old_rulespath, err}, req.id[0..]);
         fail(s);
     };
-    save_blob(cfg, req.id[0..], old_pubpath, cur_pub) catch {
-        log("cannot save to {s}/{s}/{s}\n", .{cfg.datadir, req.id[0..], old_pubpath}, req.id[0..]);
+    save_blob(cfg, req.id[0..], old_pubpath, cur_pub) catch |err| {
+        log("cannot save to {s}/{s}/{s}: {}\n", .{cfg.datadir, req.id[0..], old_pubpath, err}, req.id[0..]);
         fail(s);
     };
 
-    save_blob(cfg, req.id[0..], "rules"[0..], new_rules) catch {
-        log("cannot save to {s}/{s}/rules\n", .{cfg.datadir, req.id[0..]}, req.id[0..]);
+    save_blob(cfg, req.id[0..], "rules"[0..], new_rules) catch |err| {
+        log("cannot save to {s}/{s}/rules: {}\n", .{cfg.datadir, req.id[0..], err}, req.id[0..]);
         fail(s);
     };
-    save_blob(cfg, req.id[0..], "pub"[0..], new_pub) catch {
-        log("cannot save to {s}/{s}/pub\n", .{cfg.datadir, req.id[0..]}, req.id[0..]);
+    save_blob(cfg, req.id[0..], "pub"[0..], new_pub) catch |err| {
+        log("cannot save to {s}/{s}/pub: {}\n", .{cfg.datadir, req.id[0..], err}, req.id[0..]);
         fail(s);
     };
 
     // delete the previously "new" files
     const nkpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", new });
-    posix.unlink(nkpath) catch fail(s);
+    posix.unlink(nkpath) catch |err| {
+        log("failed to delete {s}: {}\n", .{nkpath, err}, req.id[0..]);
+        fail(s);
+    };
     allocator.free(nkpath);
 
     const nppath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "pub.", new });
-    posix.unlink(nppath) catch fail(s);
+    posix.unlink(nppath) catch |err| {
+        log("failed to delete {s}: {}\n", .{nppath, err}, req.id[0..]);
+        fail(s);
+    };
     allocator.free(nppath);
 
     const nrpath = try mem.concat(allocator, u8, &[_][]const u8{ path, "/", "rules.", new });
-    posix.unlink(nrpath) catch fail(s);
+    posix.unlink(nrpath) catch |err| {
+        log("failed to delete {s}: {}\n", .{nrpath, err}, req.id[0..]);
+        fail(s);
+    };
     allocator.free(nrpath);
 
     // send ack
-    _ = try s.write("ok");
-    try s.flush();
+    _ = s.write("ok") catch |err| {
+        log("failed to write confirmation of commit/undo: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    s.flush() catch |err| {
+        log("failed to flush confirmation of commit/undo: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
+    log("commit/undo successful\n", .{}, req.id[0..]);
 }
 
 /// this op returns a requested blob
 fn read(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch fail(s);
+    auth(cfg, s, req, false) catch |err| {
+        log("failed to auth for read op: {}\n", .{err}, req.id[0..]);
+        fail(s);
+    };
 
     if (load_blob(allocator, cfg, req.id[0..], "blob", null)) |r| {
-        _ = try s.write(r);
+        _ = s.write(r) catch |err| {
+            log("failed to send blob: {}\n", .{err}, req.id[0..]);
+            return err;
+        };
         allocator.free(r);
-    } else |_| {
-        _ = try s.write("");
+    } else |err| {
+        log("failed to load blob: {}\n", .{err}, req.id[0..]);
+        _ = s.write("") catch |err2| {
+            log("failed to write null blob: {}\n", .{err2}, req.id[0..]);
+        };
     }
-    try s.flush();
+    s.flush() catch |err| {
+        log("failed to flush blob: {}\n", .{err}, req.id[0..]);
+        return err;
+    };
 }
