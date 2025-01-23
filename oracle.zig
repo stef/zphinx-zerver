@@ -204,7 +204,7 @@ pub fn main() anyerror!void {
                 const rc = posix.system.waitpid(-1, &status, posix.system.W.NOHANG);
                 if(rc>0) {
                     kids.remove(mem.asBytes(&rc));
-                    if(cfg.verbose) warn("removing kid {} from pool\n",.{rc});
+                    warn("{} removing kid {} from pool\n",.{std.os.linux.getpid(), rc});
                 }
                 continue;
             }
@@ -212,9 +212,9 @@ pub fn main() anyerror!void {
         }
 
         while (kids.count() >= cfg.max_kids) {
-            if (cfg.verbose) warn("waiting for kid to die\n", .{});
+            log("pool full, waiting for kid to die\n", .{}, "");
             const pid = posix.waitpid(-1, 0).pid;
-            if (cfg.verbose) warn("wait returned: {}\n", .{pid});
+            log("wait returned: {}\n", .{pid}, "");
             kids.remove(mem.asBytes(&pid));
         }
 
@@ -231,9 +231,10 @@ pub fn main() anyerror!void {
                     return ssl.convertError(ssl.c.br_ssl_engine_last_error(&sc.eng));
                 }
                 var s = ssl.initStream(&sc.eng, &conn.stream, &conn.stream);
+                log("connection accepted\n", .{}, "");
                 ratelimit(&cfg, &s) catch |err| {
                     if(err==error.WouldBlock or err==error.IO) {
-                        if(cfg.verbose) warn("timeout, abort.\n",.{});
+                        log("timeout, abort.\n",.{}, "");
                         _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
                         conn.stream.close();
                     } else {
@@ -276,59 +277,65 @@ fn parse_req(cfg: *const Config, s: anytype, msg: []u8) *Request {
     return req;
 }
 
+fn log(comptime msg: []const u8, args: anytype, recid: []const u8) void {
+    const pid = std.os.linux.getpid();
+    warn("{} {} {s} ", .{pid, conn.address, recid});
+    warn(msg, args);
+}
+
 fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
-    //warn("ratelimit start\n", .{});
+    log("ratelimit start\n", .{}, "");
     var op: [1]u8 = undefined;
     _ = s.read(op[0..]) catch |err| {
         if(err==ssl.BearError.UNSUPPORTED_VERSION) {
-           warn("{} unsupported TLS version. aborting.\n",.{conn.address});
+           log("unsupported TLS version. aborting.\n",.{}, "");
            try s.close();
            posix.exit(0);
         } else if(err==ssl.BearError.UNKNOWN_ERROR_582 or err==ssl.BearError.UNKNOWN_ERROR_552) {
-           warn("{} unknown TLS error: {}. aborting.\n",.{conn.address, err});
+           log("unknown TLS error: {}. aborting.\n",.{err}, "");
            try s.close();
            posix.exit(0);
         } else if(err==ssl.BearError.BAD_VERSION) {
-           warn("{} bad TLS version. aborting.\n",.{conn.address});
+           log("bad TLS version. aborting.\n",.{},"");
            try s.close();
            posix.exit(0);
         }
     };
 
-    //if (cfg.verbose) warn("rl op {x}\n", .{op[0]});
+    log("ratelimit op {x}\n", .{op[0]}, "");
 
     switch (@as(ChallengeOp, @enumFromInt(op[0]))) {
         ChallengeOp.SPHINX_CREATE => {
             var req = [_]u8{0} ** 65;
             const reqlen = try s.read(req[1..]);
             if(reqlen+1 != req.len) {
-                warn("invalid create request. aborting.\n",.{});
+                log("invalid create request. aborting.\n",.{}, "");
             }
             const request = parse_req(cfg, s, req[0..]);
-            if (cfg.verbose) warn("{} sphinx op create {s}\n", .{conn.address, request.id});
+            log("sphinx op create\n", .{}, &request.id);
             try handler(cfg, s, request);
         },
         ChallengeOp.SPHINX_DKG_CREATE => {
             var req = [_]u8{0} ** 65;
             const reqlen = try s.read(req[1..]);
             if(reqlen+1 != req.len) {
-                warn("invalid dkg create request. aborting.\n",.{});
+                log("invalid dkg create request. aborting.\n",.{}, "");
             }
             req[0] = op[0];
             const request = parse_req(cfg, s, req[0..]);
-            if (cfg.verbose) warn("{} sphinx op dkg create {s}\n", .{conn.address, request.id});
+            log("sphinx op dkg create\n", .{}, &request.id);
             try handler(cfg, s, request);
         },
         ChallengeOp.CHALLENGE_CREATE => {
-            if (cfg.verbose) warn("{} rl op challenge\n", .{conn.address});
+            log("ratelimit op challenge\n", .{}, "");
             try create_challenge(cfg, s);
         },
         ChallengeOp.VERIFY => {
-            if (cfg.verbose) warn("{} rl op solve\n", .{conn.address});
+            log("rl op solve\n", .{}, "");
             try verify_challenge(cfg, s);
         },
         _ => {
-            if (cfg.verbose) warn("{} invalid ratelimit op. aborting.\n",.{conn.address});
+            log("invalid ratelimit op. aborting.\n",.{}, "");
         }
     }
     try s.close();
@@ -336,13 +343,13 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
 }
 
 fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
-    warn("create puzzle start\n", .{});
+    log("create puzzle start\n", .{}, "");
     // read request
     var req = [_]u8{0} ** 65;
     var reqlen : usize = 0;
     _ = try s.read(req[0..1]);
 
-    warn("create_challenge for req op {x} ", .{req[0]});
+    log("create_challenge for req op {x}.\n", .{req[0]}, "");
 
     if(@as(ReqType, @enumFromInt(req[0]))==ReqType.READ) {
         _ = try s.read(req[1..33]);
@@ -360,7 +367,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         key = k;
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("\ncannot open {s}/key error: {}\n", .{ cfg.datadir, err });
+            log("\ncannot open {s}/key error: {}\n", .{ cfg.datadir, err }, "");
             fail(s, cfg);
         }
         key = try s_allocator.alloc(u8, 32);
@@ -375,7 +382,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     challenge.ts = now;
 
     const request = parse_req(cfg, s, req[0..reqlen]);
-    if(cfg.verbose) warn("id: {s}\n", .{request.id[0..]});
+    log("record id\n", .{}, request.id[0..]);
     // figure out n & k params and set them in challenge
     if (load_blob(s_allocator, cfg, request.id[0..], "difficulty"[0..], @sizeOf(RatelimitCTX))) |diff| {
         var ctx: *RatelimitCTX = @ptrCast(@alignCast(diff[0..]));
@@ -383,7 +390,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         //if (cfg.verbose) warn("rl ctx {}\n", .{ctx});
         if(ctx.level >= Difficulties.len) {
             // invalid rl context, punish hard
-            if (cfg.verbose) warn("invalid difficulty: {}\n", .{ ctx.level });
+            log("invalid difficulty: {}\n", .{ ctx.level }, request.id[0..]);
             ctx.level = Difficulties.len - 1;
             ctx.count=0;
             save = true;
@@ -403,23 +410,23 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
             save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
         }
 
-        if(cfg.verbose) warn("rl difficulty: {}\n", .{ctx});
+        log("rl difficulty: {}\n", .{ctx}, request.id[0..]);
         challenge.n=Difficulties[ctx.level].n;
         challenge.k=Difficulties[ctx.level].k;
 
         if(ctx.level > 0) {
            if(ctx.level < Difficulties.len / 2) {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({}) at: {s}\n", .{conn.address, ctx.level, request.id});
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({})\n", .{conn.address, ctx.level}, request.id[0..]);
            } else if((ctx.level > Difficulties.len / 2) and ctx.level < (Difficulties.len - 1)) {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard at: {s}\n", .{conn.address, ctx.level, request.id});
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard\n", .{conn.address, ctx.level}, request.id[0..]);
            } else {
-               warn("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard at: {s}\n", .{conn.address, ctx.level, ctx.count, request.id});
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard\n", .{conn.address, ctx.level, ctx.count}, request.id[0..]);
            }
         }
 
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
+            log("cannot open {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err }, request.id[0..]);
             fail(s, cfg);
         }
         challenge.n = Difficulties[0].n;
@@ -431,7 +438,7 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
         };
 
         save_blob(cfg, request.id[0..], "difficulty"[0..], mem.asBytes(&ctx)[0..]) catch |err2| if (err2!=error.FileNotFound ) {
-            if (cfg.verbose) warn("cannot save {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err });
+            log("cannot save {s}/{s}/difficulty error: {}\n", .{ cfg.datadir, request.id[0..], err }, request.id[0..]);
             fail(s, cfg);
         };
     }
@@ -450,13 +457,13 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
 }
 
 fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
-    warn("verify puzzle start\n", .{});
+    log("verify puzzle start\n", .{}, "");
     // first read challenge record
     var challenge : ChallengeRequest = undefined;
     const challenge_bytes = mem.asBytes(&challenge)[0..];
     const challenge_len = try s.read(challenge_bytes);
     if(challenge_len!=challenge_bytes.len) {
-        warn("challenge record to short {} != {}\n", .{challenge_len, challenge_bytes.len});
+        log("challenge record to short {} != {}\n", .{challenge_len, challenge_bytes.len}, "");
         fail(s,cfg);
     }
     // also read original request
@@ -475,7 +482,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     if (load_blob(s_allocator, cfg, ""[0..], "key"[0..], 32)) |k| {
         key = k;
     } else |err| {
-        if (cfg.verbose) warn("cannot open {s}/key error: {}\n", .{ cfg.datadir, err });
+        log("cannot open {s}/key error: {}\n", .{ cfg.datadir, err }, "");
         fail(s, cfg);
     }
     defer s_allocator.free(key);
@@ -490,7 +497,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     _ = sodium.crypto_generichash_update(&state, tosign, tosign.len);
     _ = sodium.crypto_generichash_final(&state, &sig, sig.len);
     if(0!=sodium.sodium_memcmp(&sig, &challenge.sig, sig.len)) {
-        warn("bad sig on challenge\n", .{});
+        log("bad sig on challenge\n", .{}, "");
         fail(s,cfg);
     }
 
@@ -506,7 +513,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         }
     }
     if(expired) {
-        warn("puzzle expired. reject\n",.{});
+        log("puzzle expired. reject\n",.{}, "");
         fail(s,cfg);
     }
 
@@ -516,14 +523,14 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
     defer allocator.free(solution);
     const sollen = try s.read(solution[0..]);
     if(sollen!=solsize) {
-        warn("truncated solution\n",.{});
+        log("truncated solution\n",.{}, "");
         fail(s,cfg);
     }
     var seed: []u8 = try allocator.alloc(u8, challenge_len + reqlen);
     @memcpy(seed[0..challenge_len], challenge_bytes);
     @memcpy(seed[challenge_len..challenge_len+reqlen], req[0..reqlen]);
     if(0==equihash.verify(challenge.n, challenge.k, seed.ptr, seed.len, solution.ptr, solsize)) {
-        warn("bad challenge solution\n",.{});
+        log("bad challenge solution\n",.{}, "");
         fail(s,cfg);
     }
 
@@ -541,7 +548,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         ctx.ts = now;
         save_blob(cfg, request.id[0..], "difficulty"[0..], diff) catch fail(s, cfg);
     } else |err| {
-        if (cfg.verbose) warn("cannot open {s}/{s}/difficulty, error: {}\n", .{ cfg.datadir, request.id[0..], err });
+        log("cannot open {s}/{s}/difficulty, error: {}\n", .{ cfg.datadir, request.id[0..], err }, request.id[0..]);
         fail(s, cfg);
     }
 
@@ -551,7 +558,7 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
 /// dispatcher for incoming client requests
 /// parses incoming request and calls appropriate op
 fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
-    if (cfg.verbose) warn("{} sphinx op {} {s}\n", .{conn.address, req.op, req.id});
+    log("sphinx op {}\n", .{req.op}, &req.id);
     switch (req.op) {
         ReqType.CREATE => {
             try create(cfg, s, req);
@@ -596,9 +603,11 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
 /// "\x00\x04fail" to the client and terminates.
 fn fail(s: anytype, cfg: *const Config) noreturn {
     @setCold(true);
+    log("fail\n", .{}, "");
     if (cfg.verbose) {
+        warn("frame addr stack trace ->\n", .{});
         std.debug.dumpCurrentStackTrace(@frameAddress());
-        warn("fail\n", .{});
+        warn("return addr stack trace ->\n", .{});
         std.debug.dumpCurrentStackTrace(@returnAddress());
     }
     _ = s.write("\x00\x04fail") catch null;
@@ -819,7 +828,7 @@ fn load_blob(balloc: mem.Allocator, cfg: *const Config, _path: []const u8, fname
         const fsize = s.size;
         if (_size) |size| {
             if (fsize != size) {
-                if (cfg.verbose) warn("{s} has not expected size of {}B instead has {}B\n", .{ path, size, fsize });
+                log("{s} has not expected size of {}B instead has {}B\n", .{ path, size, fsize }, "");
                 return LoadBlobError.WrongSize;
             }
         }
@@ -862,7 +871,7 @@ fn save_blob(cfg: *const Config, path: []const u8, fname: []const u8, blob: []co
         const w = try posix.write(f, blob);
         if (w != blob.len) return SphinxError.Error;
     } else |err| {
-        warn("saveblob: {}\n", .{err});
+        log("saveblob: {}\n", .{err}, "");
         return SphinxError.Error;
     }
 }
@@ -926,22 +935,22 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
             blob = b;
         } else |err| {
             if (err != error.FileNotFound) {
-                if (cfg.verbose) warn("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err });
+                log("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err }, hexid);
                 fail(s, cfg);
             }
-            warn("user blob authkey fund, but no blob for id: {s}\n", .{hexid});
+            log("user blob authkey fund, but no blob for id: {s}\n", .{hexid}, hexid);
             fail(s,cfg);
         }
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err });
+            log("cannot open {s}/{s}/blob error: {}\n", .{ cfg.datadir, hexid, err }, hexid);
             fail(s, cfg);
         }
         // ensure that the blob record directory also doesn't exist
         const tdir = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", hexid });
         defer allocator.free(tdir);
         if (utils.dir_exists(tdir)) {
-            warn("user blob authkey not found, but dir exists: {s}\n", .{hexid});
+            log("user blob authkey not found, but dir exists: {s}/{s}\n", .{cfg.datadir, hexid}, hexid);
             fail(s,cfg);
         }
 
@@ -1056,23 +1065,23 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
     try s.flush();
     if (rlen != resp.len) fail(s, cfg);
     if(cfg.verbose) {
-        warn("[auth] sent ",.{});
+        log("[auth] sent ",.{}, req.id[0..]);
         utils.hexdump(resp[0..]);
     }
     var sig = [_]u8{0} ** 64;
     if (s.read(sig[0..sig.len])) |siglen| {
         if (siglen != sig.len) fail(s, cfg);
     } else |e| {
-        warn("error reading sig: {}\n", .{e});
+        log("error reading sig: {}\n", .{e}, req.id[0..]);
         fail(s,cfg);
     }
     if(cfg.verbose) {
-        warn("[auth] sig ",.{});
+        log("[auth] sig ",.{}, req.id[0..]);
         utils.hexdump(sig[0..]);
     }
     if (0 != sodium.crypto_sign_verify_detached(&sig, resp[(resp.len - 32)..].ptr, 32, pk[0..].ptr)) {
-        warn("bad sig\n", .{});
-        if(cfg.verbose) warn("pk: ",.{});
+        log("bad sig\n", .{}, req.id[0..]);
+        log("pk: ",.{}, req.id[0..]);
         utils.hexdump(pk);
         fail(s, cfg);
     }
@@ -1089,15 +1098,15 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
         defer posix.close(f);
         const rs = try posix.read(f, ltsigkey);
         if (rs != ltsigkey.len) {
-            if (cfg.verbose) warn("corrupted {s} size: {}\n", .{ cfg.ltsigkey, rs });
+            log("corrupted {s} size: {}\n", .{ cfg.ltsigkey, rs }, "");
             fail(s,cfg);
         }
     } else |err| {
         if (err != error.FileNotFound) {
-            if (cfg.verbose) warn("cannot open {s} error: {}\n", .{ cfg.ltsigkey, err });
+            log("cannot open {s} error: {}\n", .{ cfg.ltsigkey, err }, "");
             fail(s, cfg);
         }
-        warn("no ltsigkey found at : {s}\n", .{cfg.ltsigkey});
+        log("no ltsigkey found at : {s}\n", .{cfg.ltsigkey}, "");
         fail(s,cfg);
     }
 
@@ -1106,7 +1115,7 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
 
     const retsp = tp_dkg.tpdkg_start_peer(@ptrCast(peer), cfg.ts_epsilon, ltsigkey.ptr, @ptrCast(msg0.ptr));
     if(retsp!=0) {
-        warn("failed to start tp-dkg peer (error code: {})\n", .{retsp});
+        log("failed to start tp-dkg peer (error code: {})\n", .{retsp}, "");
         fail(s, cfg);
     }
     const n = @as(*tp_dkg.TP_DKG_PeerState, @ptrCast(peer)).n;
@@ -1154,7 +1163,7 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
         defer allocator.free(resp);
         const ret = tp_dkg.tpdkg_peer_next(@ptrCast(peer), msg.ptr, msg.len, resp.ptr, resp.len);
         if(0!=ret) {
-            warn("TP DKG failed with {} in step {}.", .{ret, cur_step});
+            log("TP DKG failed with {} in step {}.", .{ret, cur_step}, "");
             tp_dkg.tpdkg_peer_free(@ptrCast(peer));
             fail(s, cfg);
         }
@@ -1235,7 +1244,7 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
     defer s_allocator.free(share);
     try dkg(cfg, s, msg0[0..], share[0..]);
     if(DEBUG) {
-        warn("[dkg] share ",.{});
+        log("[dkg] share ",.{}, req.id[0..]);
         utils.hexdump(share[0..]);
     }
 
