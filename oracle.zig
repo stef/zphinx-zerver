@@ -184,6 +184,7 @@ pub fn main() anyerror!void {
            //unreachable,
         }
     };
+    warn("{} listening on {}\n", .{std.os.linux.getpid(), addr});
 
     const to = posix.timeval{
         .tv_sec = cfg.timeout,
@@ -197,6 +198,7 @@ pub fn main() anyerror!void {
     while (true) {
         if(srv.accept()) |c| {
             conn = c;
+            log("new connection\n", .{}, "");
         } else |e| {
             if(e==error.WouldBlock) {
                 while(true) {
@@ -205,7 +207,7 @@ pub fn main() anyerror!void {
                     const rc = posix.system.waitpid(-1, &status, posix.system.W.NOHANG);
                     if(rc>0) {
                         kids.remove(mem.asBytes(&rc));
-                        warn("{} removing kid {} from pool\n",.{std.os.linux.getpid(), rc});
+                        log("removing kid {} from pool\n",.{rc}, "");
                     } else break;
                 }
                 continue;
