@@ -782,6 +782,7 @@ fn loadcfg() anyerror!Config {
             defer allocator.free(b64pk);
             _ = std.base64.standard.Encoder.encode(b64pk, pk);
             warn("The following is the base64 encoded public key that you can also share:\n{s}\n", .{b64pk});
+            posix.exit(0);
         } else {
             warn("Long-term signing key at {s} is not readable.\n", .{cfg.ltsigkey});
             warn("You can generate one by running: {s} init\n", .{std.mem.span(std.os.argv[0])});
