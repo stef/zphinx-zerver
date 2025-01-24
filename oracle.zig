@@ -744,56 +744,47 @@ fn loadcfg() anyerror!Config {
     }
 
     std.fs.cwd().access(cfg.ltsigkey, .{}) catch {
-        var args = std.process.args();
-        var arg0: ?[] const u8 = null;
-        while(args.next()) |arg| {
-            if(arg0 == null) {
-                arg0 = std.mem.span(arg.ptr);
-                continue;
+        if(std.os.argv.len == 2 and std.mem.eql(u8,std.mem.span(std.os.argv[1]), "init")) {
+            // create lt sig key pair
+            const sk = try s_allocator.alloc(u8, sodium.crypto_sign_SECRETKEYBYTES);
+            defer s_allocator.free(sk);
+            const pk = try allocator.alloc(u8, sodium.crypto_sign_PUBLICKEYBYTES);
+            defer allocator.free(pk);
+            if(0!=sodium.crypto_sign_keypair(pk.ptr, sk.ptr)) {
+                return SphinxError.Error;
             }
-            if(std.mem.eql(u8,arg, "init")) {
-                // create lt sig key pair
-                const sk = try s_allocator.alloc(u8, sodium.crypto_sign_SECRETKEYBYTES);
-                defer s_allocator.free(sk);
-                const pk = try allocator.alloc(u8, sodium.crypto_sign_PUBLICKEYBYTES);
-                defer allocator.free(pk);
-                if(0!=sodium.crypto_sign_keypair(pk.ptr, sk.ptr)) {
-                    return SphinxError.Error;
-                }
 
-                if (posix.open(cfg.ltsigkey, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o600)) |f| {
-                    defer posix.close(f);
-                    const w = try posix.write(f, sk);
-                    if (w != sk.len) return SphinxError.Error;
-                } else |err| {
-                    warn("failed to save ltsigkey: {}\n", .{err});
-                    return SphinxError.Error;
-                }
-
-                const pubpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.ltsigkey, ".pub" });
-                defer allocator.free(pubpath);
-                if (posix.open(pubpath, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o666)) |f| {
-                    defer posix.close(f);
-                    const w = try posix.write(f, pk);
-                    if (w != pk.len) return SphinxError.Error;
-                } else |err| {
-                    warn("failed to save ltsigkey: {}\n", .{err});
-                    return SphinxError.Error;
-                }
-                warn("successfully created long-term signature key pair at:\n", .{});
-                warn("{s}\n", .{cfg.ltsigkey});
-                warn("and the public key - which you should make available to all clients -, is at:\n", .{});
-                warn("{s}.pub\n", .{cfg.ltsigkey});
-
-                const b64pk : []u8 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(pk[0..].len));
-                defer allocator.free(b64pk);
-                _ = std.base64.standard.Encoder.encode(b64pk, pk);
-                warn("The following is the base64 encoded public key that you can also share:\n{s}\n", .{b64pk});
-                break;
+            if (posix.open(cfg.ltsigkey, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o600)) |f| {
+                defer posix.close(f);
+                const w = try posix.write(f, sk);
+                if (w != sk.len) return SphinxError.Error;
+            } else |err| {
+                warn("failed to save ltsigkey: {}\n", .{err});
+                return SphinxError.Error;
             }
+
+            const pubpath = try mem.concat(allocator, u8, &[_][]const u8{ cfg.ltsigkey, ".pub" });
+            defer allocator.free(pubpath);
+            if (posix.open(pubpath, .{.ACCMODE=.WRONLY, .CREAT = true }, 0o666)) |f| {
+                defer posix.close(f);
+                const w = try posix.write(f, pk);
+                if (w != pk.len) return SphinxError.Error;
+            } else |err| {
+                warn("failed to save ltsigkey: {}\n", .{err});
+                return SphinxError.Error;
+            }
+            warn("successfully created long-term signature key pair at:\n", .{});
+            warn("{s}\n", .{cfg.ltsigkey});
+            warn("and the public key - which you should make available to all clients -, is at:\n", .{});
+            warn("{s}.pub\n", .{cfg.ltsigkey});
+
+            const b64pk : []u8 = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(pk[0..].len));
+            defer allocator.free(b64pk);
+            _ = std.base64.standard.Encoder.encode(b64pk, pk);
+            warn("The following is the base64 encoded public key that you can also share:\n{s}\n", .{b64pk});
         } else {
             warn("Long-term signing key at {s} is not readable.\n", .{cfg.ltsigkey});
-            warn("You can generate one by running: {s} init\n", .{arg0 orelse "oracle"});
+            warn("You can generate one by running: {s} init\n", .{std.mem.span(std.os.argv[0])});
             posix.exit(1);
         }
     };
