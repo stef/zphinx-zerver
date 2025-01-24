@@ -317,7 +317,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
             }
             const request = parse_req(s, req[0..]);
             log("sphinx op create\n", .{}, &request.id);
-            try handler(cfg, s, request);
+            try handler(cfg, s, request, req[0..reqlen]);
         },
         ChallengeOp.SPHINX_DKG_CREATE => {
             var req = [_]u8{0} ** 65;
@@ -328,7 +328,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
             req[0] = op[0];
             const request = parse_req(s, req[0..]);
             log("sphinx op dkg create\n", .{}, &request.id);
-            try handler(cfg, s, request);
+            try handler(cfg, s, request, req[0..reqlen]);
         },
         ChallengeOp.CHALLENGE_CREATE => {
             //log("ratelimit op challenge\n", .{}, "");
@@ -556,12 +556,12 @@ fn verify_challenge(cfg: *const Config, s: anytype) anyerror!void {
         fail(s);
     }
 
-    return handler(cfg, s, request);
+    return handler(cfg, s, request, req[0..reqlen]);
 }
 
 /// dispatcher for incoming client requests
 /// parses incoming request and calls appropriate op
-fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
+fn handler(cfg: *const Config, s: anytype, req : *const Request, raw_req: []u8) anyerror!void {
     log("sphinx op {}\n", .{req.op}, &req.id);
     switch (req.op) {
         ReqType.CREATE => {
@@ -577,25 +577,25 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
             try get(cfg, s, req, true);
         },
         ReqType.CHANGE => {
-            try change(cfg, s, req);
+            try change(cfg, s, req, raw_req);
         },
         ReqType.CHANGE_DKG => {
-            try change_dkg(cfg, s, req);
+            try change_dkg(cfg, s, req, raw_req);
         },
         ReqType.DELETE => {
-            try delete(cfg, s, req, false);
+            try delete(cfg, s, req, raw_req, false);
         },
         ReqType.V1DELETE => {
-            try delete(cfg, s, req, true);
+            try delete(cfg, s, req, raw_req, true);
         },
         ReqType.COMMIT => {
-            try commit_undo(cfg, s, req, "new", "old");
+            try commit_undo(cfg, s, req, raw_req, "new", "old");
         },
         ReqType.UNDO => {
-            try commit_undo(cfg, s, req, "old", "new");
+            try commit_undo(cfg, s, req, raw_req, "old", "new");
         },
         ReqType.READ => {
-            try read(cfg, s, req);
+            try read(cfg, s, req, raw_req);
         },
     }
     try s.close();
@@ -1075,7 +1075,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
 /// correctly to authorize whatever operation follows. the pubkey for
 /// the signature is stored in the directory indicated by the ID in
 /// the initial request from the client.
-fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
+fn auth(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8, isv1: bool) anyerror!void {
     var pk: []u8 = undefined;
     if (load_blob(allocator, cfg, req.id[0..], "pub"[0..], 32)) |k| {
         pk = k;
@@ -1146,7 +1146,11 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
         log("[auth] sig ",.{}, req.id[0..]);
         utils.hexdump(sig[0..]);
     }
-    if (0 != sodium.crypto_sign_verify_detached(&sig, resp[(resp.len - 32)..].ptr, 32, pk[0..].ptr)) {
+
+    const payload = mem.concat(allocator, u8, &[_][]const u8{ raw_req, resp[(resp.len - 32)..]}) catch fail(s);
+    defer allocator.free(payload);
+
+    if (0 != sodium.crypto_sign_verify_detached(&sig, payload.ptr, payload.len, pk[0..].ptr)) {
         log("bad sig\n", .{}, req.id[0..]);
         log("pk: ",.{}, req.id[0..]);
         utils.hexdump(pk);
@@ -1542,8 +1546,8 @@ fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror
 }
 
 /// this op creates a new oprf key under the id, but stores it as "new", it must be "commited" to be set active
-fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch |err| {
+fn change(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8) anyerror!void {
+    auth(cfg, s, req, raw_req, false) catch |err| {
         log("failed to auth for change op: {}\n", .{err}, req.id[0..]);
         fail(s);
     };
@@ -1631,8 +1635,8 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
     log("change successful\n", .{}, req.id[0..]);
 }
 
-fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch |err| {
+fn change_dkg(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8) anyerror!void {
+    auth(cfg, s, req, raw_req, false) catch |err| {
         log("failed to auth for change op: {}\n", .{err}, req.id[0..]);
         fail(s);
     };
@@ -1734,11 +1738,11 @@ fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
 }
 
 /// this op deletes a complete id if it is authenticated, a host-username blob is also updated.
-fn delete(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror!void {
+fn delete(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8, isv1: bool) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
-    auth(cfg, s, req, isv1) catch |err| {
+    auth(cfg, s, req, raw_req, isv1) catch |err| {
         log("failed to auth for delete op: {}\n", .{err}, req.id[0..]);
         fail(s);
     };
@@ -1772,7 +1776,7 @@ fn delete(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyer
 /// this generic function implements both commit and undo. essentially
 /// it sets the one in "new" as the new key, and stores the old key
 /// under "old"
-fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
+fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8, new: *const [3:0]u8, old: *const [3:0]u8) anyerror!void {
     const path = try mem.concat(allocator, u8, &[_][]const u8{ cfg.datadir, "/", req.id[0..] });
     defer allocator.free(path);
 
@@ -1781,7 +1785,7 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
         fail(s);
     }
 
-    auth(cfg, s, req, false) catch |err| {
+    auth(cfg, s, req, raw_req, false) catch |err| {
         log("failed to auth for commit/undo op: {}\n", .{err}, req.id[0..]);
         fail(s);
     };
@@ -1921,8 +1925,8 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
 }
 
 /// this op returns a requested blob
-fn read(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
-    auth(cfg, s, req, false) catch |err| {
+fn read(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8) anyerror!void {
+    auth(cfg, s, req, raw_req, false) catch |err| {
         log("failed to auth for read op: {}\n", .{err}, req.id[0..]);
         fail(s);
     };
