@@ -35,6 +35,11 @@ pub const equihash = @cImport({
 pub const wordexp = @cImport({
     @cInclude("wordexp.h");
 });
+pub const arpainet = @cImport({
+    @cInclude("arpa/inet.h");
+});
+
+const sslStream = ssl.Stream(*net.Stream, *net.Stream);
 
 /// The size of an encrypted pwd gen rule
 ///    6    - the size of the rule itself
@@ -168,6 +173,7 @@ var conn: net.Server.Connection = undefined;
 /// number of childs is configurable, as is the listening IP address and port
 pub fn main() anyerror!void {
     const cfg = try loadcfg();
+    try_socketactivation(&cfg);
     const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast(cfg.ssl_key));
     var certs_len: usize = undefined;
     const certs: *ssl.c.br_x509_certificate = ssl.c.read_certificates(@ptrCast(cfg.ssl_cert), &certs_len);
@@ -256,6 +262,58 @@ pub fn main() anyerror!void {
     }
 }
 
+fn flush(s: anytype) !void {
+    if(@TypeOf(s) == net.Stream) {
+        return;
+    } else {
+        const ssls: *sslStream = @ptrCast(@constCast(@alignCast(s)));
+        return ssls.flush();
+    }
+}
+
+fn close(s: anytype) !void {
+    if(@TypeOf(s) == net.Stream) {
+        s.close();
+        return;
+    } else {
+        return s.close();
+    }
+}
+
+fn try_socketactivation(cfg: *const Config) void {
+    if(std.os.argv.len != 2) return;
+
+    const fd = std.fmt.parseInt(u16, std.mem.span(std.os.argv[1]), 10) catch {
+        warn("invalid parameter found: \"{s}\"\n", .{std.mem.span(std.os.argv[1])});
+        posix.exit(1);
+    };
+    warn("fd found: {}\n", .{fd});
+    const s: net.Stream = .{
+        .handle = fd,
+    };
+
+    var sa: posix.sockaddr align(4) = undefined;
+    var salen: posix.socklen_t = @sizeOf(posix.sockaddr);
+    posix.getpeername(fd, &sa, &salen) catch |err| {
+        warn("getpeername error: {}\n", .{err});
+        posix.exit(1);
+    };
+    conn = .{ .stream = s,
+             .address = net.Address.initPosix(&sa)};
+
+    ratelimit(cfg,&s) catch |err| {
+        if(err==error.WouldBlock or err==error.IO) {
+            log("timeout, abort.\n",.{}, "");
+            _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
+            conn.stream.close();
+        } else {
+            log("socket activation failed: {}\n", .{err}, "");
+        }
+        posix.exit(1);
+    };
+    posix.exit(0);
+}
+
 /// parse incoming requests into a Request structure
 /// most importantly convert raw id into hex id
 fn parse_req(s: anytype, msg: []u8) *Request {
@@ -293,15 +351,15 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
     _ = s.read(op[0..]) catch |err| {
         if(err==ssl.BearError.UNSUPPORTED_VERSION) {
            log("unsupported TLS version. aborting.\n",.{}, "");
-           try s.close();
+           try close(s);
            posix.exit(0);
         } else if(err==ssl.BearError.UNKNOWN_ERROR_582 or err==ssl.BearError.UNKNOWN_ERROR_552) {
            log("unknown TLS error: {}. aborting.\n",.{err}, "");
-           try s.close();
+           try close(s);
            posix.exit(0);
         } else if(err==ssl.BearError.BAD_VERSION) {
            log("bad TLS version. aborting.\n",.{},"");
-           try s.close();
+           try close(s);
            posix.exit(0);
         }
     };
@@ -342,7 +400,7 @@ fn ratelimit(cfg: *const Config, s: anytype) anyerror!void {
             log("invalid ratelimit op. aborting.\n",.{}, "");
         }
     }
-    try s.close();
+    try close(s);
     posix.exit(0);
 }
 
@@ -598,7 +656,7 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request) anyerror!void {
             try read(cfg, s, req);
         },
     }
-    try s.close();
+    try close(s);
     allocator.destroy(req);
     posix.exit(0);
 }
@@ -615,9 +673,9 @@ fn fail(s: anytype) noreturn {
         std.debug.dumpCurrentStackTrace(@returnAddress());
     }
     _ = s.write("\x00\x04fail") catch null;
-    _ = s.flush() catch null;
+    _ = flush(s) catch null;
     _ = std.os.linux.shutdown(conn.stream.handle, std.os.linux.SHUT.RDWR);
-    _ = s.close() catch null;
+    _ = close(s) catch null;
     posix.exit(0);
 }
 
@@ -969,7 +1027,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
         log("truncated write of blob sent only {} out of {}\n", .{bw, blob.len}, hexid);
         fail(s);
     }
-    try s.flush();
+    try flush(s);
 
     if (new) {
         var buf = [_]u8{0} ** (2 + 32 + 64 + 65536);
@@ -1121,7 +1179,7 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
         log("failed to write auth response: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush auth response: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1157,7 +1215,7 @@ fn auth(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerro
         log("failed to write auth:ok message: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    _ = s.flush() catch |err| {
+    _ = flush(s) catch |err| {
         log("failed to write auth:ok message: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1255,7 +1313,7 @@ fn dkg(cfg: *const Config, s: anytype, msg0: []const u8, share: []u8) anyerror!v
                 log("incorrect length of message step{} message to TP: expected: {}B, received {}B\n", .{cur_step, resp.len, bw}, "");
                 fail(s);
             }
-            try s.flush();
+            try flush(s);
         }
     }
 
@@ -1290,7 +1348,7 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         log("failed to send beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1351,7 +1409,7 @@ fn create(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         log("failed to write confirmation of create: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of create: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1400,7 +1458,7 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
         log("failed to send beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1463,7 +1521,7 @@ fn create_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
         log("failed to write confirmation of dkg create: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of dkg create: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1534,7 +1592,7 @@ fn get(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyerror
         log("failed to write response: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush response: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1580,7 +1638,7 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         log("failed to send beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1624,7 +1682,7 @@ fn change(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
         log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1683,7 +1741,7 @@ fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
         log("failed to send beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush beta: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1726,7 +1784,7 @@ fn change_dkg(cfg: *const Config, s: anytype, req: *const Request) anyerror!void
         log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1762,7 +1820,7 @@ fn delete(cfg: *const Config, s: anytype, req: *const Request, isv1: bool) anyer
         log("failed to write confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of change: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1913,7 +1971,7 @@ fn commit_undo(cfg: *const Config, s: anytype, req: *const Request, new: *const 
         log("failed to write confirmation of commit/undo: {}\n", .{err}, req.id[0..]);
         return err;
     };
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush confirmation of commit/undo: {}\n", .{err}, req.id[0..]);
         return err;
     };
@@ -1939,7 +1997,7 @@ fn read(cfg: *const Config, s: anytype, req: *const Request) anyerror!void {
             log("failed to write null blob: {}\n", .{err2}, req.id[0..]);
         };
     }
-    s.flush() catch |err| {
+    flush(s) catch |err| {
         log("failed to flush blob: {}\n", .{err}, req.id[0..]);
         return err;
     };
