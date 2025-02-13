@@ -225,6 +225,7 @@ pub fn main() anyerror!void {
         var pid = try posix.fork();
         switch (pid) {
             0 => {
+                setSigHandler();
                 var sc: ssl.c.br_ssl_server_context = undefined;
                 //c.br_ssl_server_init_full_ec(&sc, certs, certs_len, c.BR_KEYTYPE_EC, &sk.key.ec);
                 ssl.c.br_ssl_server_init_minf2c(&sc, certs, certs_len, &sk.key.ec);
@@ -1946,5 +1947,23 @@ fn read(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8) anye
     s.flush() catch |err| {
         log("failed to flush blob: {}\n", .{err}, req.id[0..]);
         return err;
+    };
+}
+
+fn sigHandler(sig: i32) callconv(.C) void {
+    if (sig == std.posix.SIG.PIPE) {
+        std.c._exit(9);
+    }
+}
+
+fn setSigHandler() void {
+    var sa: std.posix.Sigaction = .{
+        .handler = .{ .handler = sigHandler },
+        .mask = std.posix.empty_sigset,
+        .flags = std.posix.SA.RESTART,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sa, null) catch |err| {
+        log("failed to install sighandler: {}\n", .{err}, "");
+        posix.exit(99);
     };
 }
