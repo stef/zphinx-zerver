@@ -1,7 +1,7 @@
 #ifndef workaround_h
 #define workaround_h
-#include "tp-dkg.h"
-#include "toprf.h"
+#include "oprf/tp-dkg.h"
+#include "oprf/toprf.h"
 #include <stdint.h>
 
 TP_DKG_PeerState* new_peerstate(void);

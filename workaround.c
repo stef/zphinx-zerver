@@ -1,5 +1,5 @@
-#include "tp-dkg.h"
-#include "toprf.h"
+#include "oprf/tp-dkg.h"
+#include "oprf/toprf.h"
 #include <stdlib.h>
 #include <string.h>
 

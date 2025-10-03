@@ -6,25 +6,25 @@ const posix = std.posix;
 const fs = std.fs;
 const mem = std.mem;
 const BufSet = std.BufSet;
-const warn = std.debug.print;
-const toml = @import("zig-toml/src/toml.zig");
-const ssl = @import("ssl.zig");
+const toml = @import("toml");
+const ssl = @import("bearssl");
 const utils = @import("utils.zig");
 const secret_allocator = @import("secret_allocator.zig");
-
-pub const DEBUG = (builtin.mode == std.builtin.OptimizeMode.Debug);
 
 pub const sodium = @cImport({
     @cInclude("sodium.h");
 });
 pub const oprf = @cImport({
-    @cInclude("liboprf/src/oprf.h");
+    @cInclude("oprf/oprf.h");
 });
 pub const toprf = @cImport({
-    @cInclude("liboprf/src/toprf.h");
+    @cInclude("oprf/toprf.h");
 });
 pub const tp_dkg = @cImport({
-    @cInclude("liboprf/src/tp-dkg.h");
+    @cInclude("oprf/tp-dkg.h");
+});
+pub const oprf_utils = @cImport({
+    @cInclude("oprf/utils.h");
 });
 pub const workaround = @cImport({
     @cInclude("workaround.h");
@@ -35,6 +35,19 @@ pub const equihash = @cImport({
 pub const wordexp = @cImport({
     @cInclude("wordexp.h");
 });
+pub const stdio = @cImport({
+    @cInclude("stdio.h");
+});
+
+pub const DEBUG = (builtin.mode == std.builtin.OptimizeMode.Debug);
+const warn = std.debug.print;
+
+/// stdout
+var stdout_buffer: [1024]u8 = undefined;
+var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+const stdout = &stdout_writer.interface;
+
+var conn: net.Server.Connection = undefined;
 
 /// The size of an encrypted pwd gen rule
 ///    6    - the size of the rule itself
@@ -46,8 +59,9 @@ pub const wordexp = @cImport({
 const V1RULE_SIZE = 79;
 const RULE_SIZE = V1RULE_SIZE + 32;
 
-/// normal non-sensitive allocator
-const allocator = std.heap.c_allocator;
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
+
 /// c_allocator for sensitive data, wrapping sodium_m(un)lock()
 var s_state = secret_allocator.secretAllocator(allocator);
 const s_allocator = s_state.allocator();
@@ -162,15 +176,34 @@ const LoadCfgError = error{
     InvalidRLDecay,
 };
 
-var conn: net.Server.Connection = undefined;
-
 /// classical forking server with tcp connection wrapped by bear ssl
 /// number of childs is configurable, as is the listening IP address and port
 pub fn main() anyerror!void {
+    try stdout.print("starting up zphinx oracle\n", .{});
+    try stdout.flush(); // don't forget to flush!
+
+    if(DEBUG) {
+        oprf_utils.debug = 1;
+        tp_dkg.log_file = @ptrCast(stdio.fdopen(2,"w"));
+    }
     const cfg = try loadcfg();
+
     const sk: *ssl.c.private_key = ssl.c.read_private_key(@ptrCast(cfg.ssl_key));
     var certs_len: usize = undefined;
     const certs: *ssl.c.br_x509_certificate = ssl.c.read_certificates(@ptrCast(cfg.ssl_cert), &certs_len);
+
+    const addresses = try std.net.getAddressList(allocator, cfg.address, cfg.port);
+    defer addresses.deinit();
+    for (addresses.addrs) |addr| {
+        var addrtype: *const [4:0]u8 = undefined;
+        switch (addr.any.family) {
+            posix.AF.INET => addrtype = "ipv4",
+            posix.AF.INET6 => addrtype = "ipv6",
+            posix.AF.UNIX => addrtype = "unix",
+            else => unreachable,
+        }
+        warn("addr: {s}, {f}\n", .{ addrtype, addr });
+    }
 
     const addr = try net.Address.parseIp(cfg.address, cfg.port);
 
@@ -184,11 +217,11 @@ pub fn main() anyerror!void {
            //unreachable,
         }
     };
-    warn("{} listening on {}\n", .{std.os.linux.getpid(), addr});
+    warn("{d} listening on {f}\n", .{std.os.linux.getpid(), addr});
 
     const to = posix.timeval{
-        .tv_sec = cfg.timeout,
-        .tv_usec = 0
+        .sec = cfg.timeout,
+        .usec = 0
     };
     try posix.setsockopt(srv.stream.handle, posix.SOL.SOCKET, posix.SO.SNDTIMEO, mem.asBytes(&to));
     try posix.setsockopt(srv.stream.handle, posix.SOL.SOCKET, posix.SO.RCVTIMEO, mem.asBytes(&to));
@@ -226,10 +259,11 @@ pub fn main() anyerror!void {
         switch (pid) {
             0 => {
                 setSigHandler();
-                var sc: ssl.c.br_ssl_server_context = undefined;
+                //var sc: ssl.c.br_ssl_server_context = undefined;
+                var sc = mem.zeroes(ssl.c.br_ssl_server_context);
                 //c.br_ssl_server_init_full_ec(&sc, certs, certs_len, c.BR_KEYTYPE_EC, &sk.key.ec);
                 ssl.c.br_ssl_server_init_minf2c(&sc, certs, certs_len, &sk.key.ec);
-                var iobuf: [ssl.c.BR_SSL_BUFSIZE_BIDI]u8 = undefined;
+                var iobuf = mem.zeroes([ssl.c.BR_SSL_BUFSIZE_BIDI]u8);
                 ssl.c.br_ssl_engine_set_buffer(&sc.eng, &iobuf, iobuf.len, 1);
                 // * Reset the server context, for a new handshake.
                 if (ssl.c.br_ssl_server_reset(&sc) == 0) {
@@ -264,7 +298,7 @@ fn parse_req(s: anytype, msg: []u8) *Request {
         var req = allocator.create(Request) catch fail(s);
         req.op = ReqType.READ;
         req.has_alpha = false;
-        _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{std.fmt.fmtSliceHexLower(msg[1..])}) catch fail(s);
+        _ = std.fmt.bufPrint(req.id[0..], "{x}", .{msg[1..]}) catch fail(s);
         return req;
     }
 
@@ -278,13 +312,13 @@ fn parse_req(s: anytype, msg: []u8) *Request {
     var req = allocator.create(Request) catch fail(s);
     req.op = rreq.op;
     @memcpy(req.alpha[0..], rreq.alpha[0..]);
-    _ = std.fmt.bufPrint(req.id[0..], "{x:0>64}", .{std.fmt.fmtSliceHexLower(rreq.id[0..])}) catch fail(s);
+    _ = std.fmt.bufPrint(req.id[0..], "{x}", .{rreq.id[0..]}) catch fail(s);
     return req;
 }
 
 fn log(comptime msg: []const u8, args: anytype, recid: []const u8) void {
     const pid = std.os.linux.getpid();
-    warn("{} {} {s} ", .{pid, conn.address, recid});
+    warn("{d} {f} {s} ", .{pid, conn.address, recid});
     warn(msg, args);
 }
 
@@ -359,11 +393,11 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
     if(@as(ReqType, @enumFromInt(req[0]))==ReqType.READ) {
         _ = try s.read(req[1..33]);
         reqlen = 33;
-        //if (cfg.verbose) warn("cc: {x:0>66} ", .{req[0..33]});
+        //if (cfg.verbose) warn("cc: {x} ", .{req[0..33]});
     } else {
         _ = try s.read(req[1..65]);
         reqlen = 65;
-        //if (cfg.verbose) warn("cc: {x:0>130} ", .{req[0..65]});
+        //if (cfg.verbose) warn("cc: {x} ", .{req[0..65]});
     }
 
     // load MAC key
@@ -421,11 +455,11 @@ fn create_challenge(cfg: *const Config, s: anytype) anyerror!void {
 
         if(ctx.level > 0) {
            if(ctx.level < Difficulties.len / 2) {
-               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones re-trying ({})\n", .{conn.address, ctx.level}, request.id[0..]);
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {f} someones re-trying ({d})\n", .{conn.address, ctx.level}, request.id[0..]);
            } else if((ctx.level > Difficulties.len / 2) and ctx.level < (Difficulties.len - 1)) {
-               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}) hard\n", .{conn.address, ctx.level}, request.id[0..]);
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {f} someones trying ({d}) hard\n", .{conn.address, ctx.level}, request.id[0..]);
            } else {
-               log("\x1b[38;5;196malert\x1b[38;5;253m: {} someones trying ({}/{}) really hard\n", .{conn.address, ctx.level, ctx.count}, request.id[0..]);
+               log("\x1b[38;5;196malert\x1b[38;5;253m: {f} someones trying ({d}/{d}) really hard\n", .{conn.address, ctx.level, ctx.count}, request.id[0..]);
            }
         }
 
@@ -607,7 +641,6 @@ fn handler(cfg: *const Config, s: anytype, req : *const Request, raw_req: []u8) 
 /// whenever anything fails during the execution of the protocol the server sends
 /// "\x00\x04fail" to the client and terminates.
 fn fail(s: anytype) noreturn {
-    @setCold(true);
     log("fail\n", .{}, "");
     if(DEBUG) {
         warn("frame addr stack trace ->\n", .{});
@@ -656,7 +689,6 @@ fn ssl_file_missing(path: []const u8) noreturn {
 ///   - ./sphinx.cfg
 /// and in this process updated the values of the default Config structure
 fn loadcfg() anyerror!Config {
-    @setCold(true);
 
     const home = posix.getenv("HOME") orelse "/nonexistant";
     const cfg1 = mem.concat(allocator, u8, &[_][]const u8{ home, "/.config/sphinx/config" }) catch unreachable;
@@ -846,7 +878,7 @@ fn load_blob(balloc: mem.Allocator, cfg: *const Config, _path: []const u8, fname
 /// caller is responsible to free returned string
 fn tohexid(id: [32]u8) anyerror![]u8 {
     const hexbuf = try allocator.alloc(u8, 64);
-    return std.fmt.bufPrint(hexbuf, "{x:0>64}", .{std.fmt.fmtSliceHexLower(id[0..])});
+    return std.fmt.bufPrint(hexbuf, "{x}", .{id[0..]});
 }
 
 /// verifies an ed25519 signed message using libsodiums crypto_sign_verify_detached
@@ -911,7 +943,7 @@ fn update_blob(cfg: *const Config, s: anytype) anyerror!void {
     const idlen = try s.read(signedid[0..signedid.len]);
     if (idlen != signedid.len) fail(s);
 
-    //if(cfg.verbose) warn("ub: {x:0>192}\n", .{signedid});
+    //if(cfg.verbose) warn("ub: {x}\n", .{signedid});
 
     const idvec: @Vector(32, u8) = signedid[0..32].*;
     if(@reduce(std.builtin.ReduceOp.Or, idvec) == 0) {
@@ -1950,7 +1982,7 @@ fn read(cfg: *const Config, s: anytype, req: *const Request, raw_req: []u8) anye
     };
 }
 
-fn sigHandler(sig: i32) callconv(.C) void {
+fn sigHandler(sig: i32) callconv(.c) void {
     if (sig == std.posix.SIG.PIPE) {
         std.c._exit(9);
     }
@@ -1959,11 +1991,8 @@ fn sigHandler(sig: i32) callconv(.C) void {
 fn setSigHandler() void {
     var sa: std.posix.Sigaction = .{
         .handler = .{ .handler = sigHandler },
-        .mask = std.posix.empty_sigset,
+        .mask = std.posix.sigemptyset(),
         .flags = std.posix.SA.RESTART,
     };
-    std.posix.sigaction(std.posix.SIG.PIPE, &sa, null) catch |err| {
-        log("failed to install sighandler: {}\n", .{err}, "");
-        posix.exit(99);
-    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sa, null);
 }

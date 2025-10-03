@@ -1,0 +1,53 @@
+.{
+    // This is the default name used by packages depending on this one. For
+    // example, when a user runs `zig fetch --save <url>`, this field is used
+    // as the key in the `dependencies` table. Although the user can choose a
+    // different name, most users will stick with this provided value.
+    //
+    // It is redundant to include "zig" in this name because it is already
+    // within the Zig package namespace.
+    .name = .zphinx,
+
+    // This is a [Semantic Version](https://semver.org/).
+    // In a future version of Zig it will be used for package deduplication.
+    .version = "2.1.0",
+
+    .minimum_zig_version = "0.15.1",
+
+    .fingerprint = 0xfe9dffaf851238d9,
+
+    // This field is optional.
+    // Each dependency must either provide a `url` and `hash`, or a `path`.
+    // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
+    // Once all dependencies are fetched, `zig build` no longer requires
+    // internet connectivity.
+    .dependencies = .{
+        .zig_toml = .{
+            .url = "git+https://github.com/stef/zig-toml.git#016674a73bb23dc07f5ba0aa9971d16727a24dc6",
+            .hash = "zig_toml-0.1.0-ngd9hwSxAAAvD39GxGG1qy6V2Y9M8N8zbeYSsNi98Ghr",
+        },
+        .zig_bearssl = .{
+            .url = "git+https://github.com/stef/zig-bearssl.git#cf7ce1a9d0d75f9e3620f88d0b5d9a23538d78ae",
+            .hash = "zig_bearssl-0.1.0-CB7xTIqkAADtxCnDYGnZZvYU76lvKDKELwvpshG-mH_e",
+        },
+        .libsodium = .{
+            .url = "git+https://github.com/jedisct1/libsodium.git#09e995c0c85a0026510704b8ce7f5867a09a3841",
+            .hash = "N-V-__8AAONJYQCM2EvfTRcbTy_p9_e6hTjX34KAk0MItmwe",
+        },
+        .liboprf = .{
+            .url = "git+https://github.com/stef/liboprf.git#86ed6dac5c41aca2d9391180f6fb576f39e57cb7",
+            .hash = "liboprf-0.9.1-2NAwiIPDEADWQI2XGdOpTU2WkOCFJabSXFJjIa8sNUDa",
+        },
+        .libequihash = .{
+            .url = "git+https://github.com/stef/equihash.git#518984ccdcbd5491198dbc47bc30f947d93eedf5",
+            .hash = "libequihash-1.0.11-2kfAuJE8AADirG_yk9kaUdX4w6d6oEt_72TZZPcgnAwT",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        // For example...
+        //"LICENSE",
+        //"README.md",
+    },
+}
