@@ -32,38 +32,27 @@ pub fn build(b: *Builder) void {
     const bearssl_module = bearssl_package.module("bearssl");
     exe.root_module.addImport("bearssl", bearssl_module);
 
-    // build vendored liboprf and libsodium
-    const libsodium_package = b.dependency("libsodium", .{
-        .target = target,
-        .optimize = optimize,
-        .@"test" = false, // `test` is a keyword in zig
-        .static = true,
-        .shared = false,
-    });
-    exe.linkLibrary(libsodium_package.artifact("sodium"));
-    exe.addIncludePath(libsodium_package.path("include"));
-
     const liboprf_package = b.dependency("liboprf", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.linkLibrary(liboprf_package.artifact("liboprf"));
-    exe.addIncludePath(liboprf_package.path("src"));
-    exe.addIncludePath(liboprf_package.path("src/noise_xk/include"));
-    exe.addIncludePath(liboprf_package.path("src/noise_xk/include/karmel"));
-    exe.addIncludePath(liboprf_package.path("src/noise_xk/include/karmel/minimal"));
+    exe.root_module.linkLibrary(liboprf_package.artifact("liboprf"));
+    exe.root_module.addIncludePath(liboprf_package.path("src"));
+    exe.root_module.addIncludePath(liboprf_package.path("src/noise_xk/include"));
+    exe.root_module.addIncludePath(liboprf_package.path("src/noise_xk/include/karmel"));
+    exe.root_module.addIncludePath(liboprf_package.path("src/noise_xk/include/karmel/minimal"));
 
     const libequihash_package = b.dependency("libequihash", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.linkLibrary(libequihash_package.artifact("libequihash"));
+    exe.root_module.linkLibrary(libequihash_package.artifact("libequihash"));
 
     exe.pie = pie;
     exe.link_z_relro = relro;
     exe.bundle_compiler_rt = true;
-    exe.addIncludePath(b.path("."));
-    exe.addCSourceFile(.{ .file = b.path("workaround.c"), .flags = &[_][]const u8{"-Wall"} });
+    exe.root_module.addIncludePath(b.path("."));
+    exe.root_module.addCSourceFile(.{ .file = b.path("workaround.c"), .flags = &[_][]const u8{"-Wall"} });
 
     const run_cmd = b.addRunArtifact(exe);
 
